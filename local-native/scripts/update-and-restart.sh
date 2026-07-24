@@ -56,13 +56,27 @@ else
 fi
 
 # ── 2) Fetch + merge upstream ────────────────────────────────
+# Stay on the current branch (expected: main tracking upstream/main).
+# Same commit-then-merge model as scripts/pull_all_upstreams.sh — do not
+# create/switch local/* branches here.
 if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
   log "fetch $UPSTREAM_REMOTE"
   git fetch "$UPSTREAM_REMOTE" --prune
   CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-  log "merge $UPSTREAM_REMOTE/$UPSTREAM_BRANCH into $CURRENT_BRANCH"
-  if ! git merge --no-edit "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"; then
-    die "merge conflict with $UPSTREAM_REMOTE/$UPSTREAM_BRANCH — resolve manually then re-run"
+  if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
+    die "detached HEAD — checkout main (tracking $UPSTREAM_REMOTE/$UPSTREAM_BRANCH) first"
+  fi
+  # Prefer configured upstream tracking when it points at the same remote;
+  # otherwise merge the explicit upstream branch (default: upstream/main).
+  TRACK_REF="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -n "$TRACK_REF" && "$TRACK_REF" == "$UPSTREAM_REMOTE"/* ]]; then
+    MERGE_REF="$TRACK_REF"
+  else
+    MERGE_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+  fi
+  log "merge $MERGE_REF into $CURRENT_BRANCH"
+  if ! git merge --no-edit "$MERGE_REF"; then
+    die "merge conflict with $MERGE_REF — resolve manually, then: git merge --continue && re-run"
   fi
 else
   log "WARNING: remote '$UPSTREAM_REMOTE' missing; skip pull"
