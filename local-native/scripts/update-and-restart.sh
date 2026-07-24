@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 1) git 提交 local-native / 工作区可提交变更
+# 1) git 提交**整个仓库**当前可跟踪变更（gitignore 排除密钥/构建物）
 # 2) 拉取 upstream 更新
 # 3) 构建前端 + 后端（必须 -tags embed）
 # 4) 重启 local-native 进程
@@ -34,23 +34,25 @@ git rev-parse --is-inside-work-tree >/dev/null || die "not a git repo: $ROOT"
 
 mkdir -p "$BIN_DIR" "$WORK" "$(dirname "$LOG")"
 
-# ── 1) Git: stage local-native + commit if needed ────────────
+# ── 1) Git: stage whole-repo trackable changes + commit ──────
 log "git status (pre-commit)"
 git status --short || true
 
-# Only add paths that should be tracked (gitignore handles secrets/build)
-git add -A -- local-native
+# Entire project; .gitignore excludes secrets/build/logs.
+# Never force-add ignored paths.
+git add -A
 
 if ! git diff --cached --quiet; then
-  # Refuse to stage secrets if somehow present
-  if git diff --cached --name-only | rg -q 'sub2api\.env$|config\.yaml$|\.dump$'; then
-    die "refusing to commit secrets/dumps; check gitignore"
+  # Hard refuse if secrets/dumps slipped past ignore rules
+  if git diff --cached --name-only | rg -q '(^|/)sub2api\.env$|(^|/)config\.yaml$|\.dump$|\.env$'; then
+    die "refusing to commit secrets/dumps; unstage and fix gitignore"
   fi
-  MSG="chore(local-native): sync scripts and ignore runtime artifacts"
-  log "committing: $MSG"
+  BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  MSG="chore: snapshot worktree before update-and-restart (${BRANCH})"
+  log "committing whole-repo trackable changes: $MSG"
   git commit -m "$MSG"
 else
-  log "nothing to commit under local-native"
+  log "nothing to commit (clean trackable worktree)"
 fi
 
 # ── 2) Fetch + merge upstream ────────────────────────────────
