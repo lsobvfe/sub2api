@@ -562,11 +562,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					if switchCount >= maxAccountSwitches {
+					nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
+					if !shouldSwitch {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					switchCount++
+					switchCount = nextSwitchCount
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -1092,11 +1093,12 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					if switchCount >= maxAccountSwitches {
+					nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
+					if !shouldSwitch {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					switchCount++
+					switchCount = nextSwitchCount
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -1635,11 +1637,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		if switchCount >= maxAccountSwitches {
+		nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
+		if !shouldSwitch {
 			closeOpenAIWSFailoverExhausted(wsConn, failoverErr)
 			return false
 		}
-		switchCount++
+		switchCount = nextSwitchCount
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			closeOpenAIWSFailoverExhausted(wsConn, failoverErr)
 			return false

@@ -25,6 +25,15 @@ const (
 	grokUpstreamUserAgent                  = "sub2api-grok/1.0"
 	grokCLIVersion                         = "0.2.93"
 	grokDefaultResponsesModel              = "grok-4.5"
+	// Upstream HTTP 503: pause this account for 24h so the scheduler stops re-selecting it.
+	grokUpstreamServiceUnavailableCooldown = 24 * time.Hour
+	// Upstream HTTP 402 (payment/quota): account cannot serve; pause 24h.
+	grokUpstreamPaymentRequiredCooldown = 24 * time.Hour
+	// subscription:free-usage-exhausted without an authoritative window reset
+	// tracks xAI's rolling free-usage period.
+	grokFreeUsageExhaustedCooldown = 24 * time.Hour
+	// Other 5xx: short cool for transient gateway noise.
+	grokUpstreamTemporaryErrorCooldown = 2 * time.Minute
 	grokRateLimitFallbackCooldown          = 2 * time.Minute
 	grokRateLimitRepeatCooldown            = 10 * time.Minute
 	grokRateLimitSustainedCooldown         = 30 * time.Minute
@@ -163,12 +172,7 @@ func (s *OpenAIGatewayService) forwardGrokResponses(
 		})
 		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
-			return nil, &UpstreamFailoverError{
-				StatusCode:             resp.StatusCode,
-				ResponseBody:           respBody,
-				ResponseHeaders:        resp.Header.Clone(),
-				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
-			}
+			return nil, s.newGrokUpstreamFailoverError(account, resp.StatusCode, resp.Header, respBody)
 		}
 		return s.handleErrorResponse(ctx, resp, c, account, patchedBody, upstreamModel)
 	}
@@ -923,12 +927,7 @@ func (s *OpenAIGatewayService) describeGrokComposerImage(
 		})
 		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
-			return "", OpenAIUsage{}, &UpstreamFailoverError{
-				StatusCode:             resp.StatusCode,
-				ResponseBody:           respBody,
-				ResponseHeaders:        resp.Header.Clone(),
-				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
-			}
+			return "", OpenAIUsage{}, s.newGrokUpstreamFailoverError(account, resp.StatusCode, resp.Header, respBody)
 		}
 		return "", OpenAIUsage{}, fmt.Errorf("grok composer image bridge upstream error: %s", upstreamMsg)
 	}
@@ -1136,7 +1135,7 @@ func (s *OpenAIGatewayService) updateGrokUsageSnapshot(ctx context.Context, acco
 }
 
 func (s *OpenAIGatewayService) updateGrokUsageFromResponse(ctx context.Context, account *Account, headers http.Header, statusCode int) {
-	snapshot := parseGrokQuotaSnapshot(headers, statusCode, time.Now())
+	snapshot := parseGrokQuotaSnapshot(headers, statusCode, time.Now(), nil)
 	if snapshot != nil {
 		s.updateGrokUsageSnapshot(ctx, account, snapshot)
 		return
@@ -1150,13 +1149,20 @@ func (s *OpenAIGatewayService) updateGrokUsageFromResponse(ctx context.Context, 
 	}
 }
 
-func parseGrokQuotaSnapshot(headers http.Header, statusCode int, now time.Time) *xai.QuotaSnapshot {
+func parseGrokQuotaSnapshot(headers http.Header, statusCode int, now time.Time, responseBody []byte) *xai.QuotaSnapshot {
 	snapshot := xai.ParseQuotaHeaders(headers, statusCode)
-	if snapshot == nil && statusCode == http.StatusTooManyRequests {
-		return &xai.QuotaSnapshot{
+	errorCode := extractGrokUpstreamErrorCode(responseBody)
+	if snapshot == nil {
+		if statusCode != http.StatusTooManyRequests && errorCode == "" {
+			return nil
+		}
+		snapshot = &xai.QuotaSnapshot{
 			StatusCode: statusCode,
 			UpdatedAt:  now.UTC().Format(time.RFC3339),
 		}
+	}
+	if errorCode != "" {
+		snapshot.ErrorCode = errorCode
 	}
 	return snapshot
 }
@@ -1184,13 +1190,52 @@ func normalizeGrokExhaustedWindowResets(snapshot *xai.QuotaSnapshot, resetAt, no
 	}
 }
 
+// grokExhaustedWindowResetAt returns the latest future reset among quota windows
+// that have remaining == 0. It is the authoritative free-usage boundary when
+// xAI exposes window headers.
+func grokExhaustedWindowResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time, bool) {
+	if snapshot == nil {
+		return time.Time{}, false
+	}
+	var resetAt time.Time
+	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
+		if window == nil || window.Remaining == nil || *window.Remaining > 0 {
+			continue
+		}
+		candidate := time.Time{}
+		if window.ResetUnix != nil && *window.ResetUnix > 0 {
+			candidate = time.Unix(*window.ResetUnix, 0)
+		} else if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(window.ResetAt)); err == nil {
+			candidate = parsed
+		}
+		if candidate.After(now) && candidate.After(resetAt) {
+			resetAt = candidate
+		}
+	}
+	if resetAt.IsZero() {
+		return time.Time{}, false
+	}
+	return resetAt, true
+}
+
 func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time, bool) {
 	if snapshot == nil {
 		return time.Time{}, false
 	}
 
-	// Retry-After is xAI's explicit retry boundary. Use the observation time so
-	// a persisted snapshot does not start a fresh cooldown every time it is read.
+	// Free rolling usage is not a short Retry-After throttle. When xAI reports
+	// subscription:free-usage-exhausted, honor the exhausted window reset, or
+	// park the account for the rolling free-usage period.
+	if isGrokFreeUsageExhaustedCode(snapshot.ErrorCode) {
+		if resetAt, ok := grokExhaustedWindowResetAt(snapshot, now); ok {
+			return resetAt, true
+		}
+		return now.Add(grokFreeUsageExhaustedCooldown), true
+	}
+
+	// Retry-After is xAI's explicit retry boundary for ordinary 429s. Use the
+	// observation time so a persisted snapshot does not start a fresh cooldown
+	// every time it is read.
 	retryAfterExpired := false
 	var resetAt time.Time
 	if snapshot.RetryAfterSeconds != nil && *snapshot.RetryAfterSeconds > 0 {
@@ -1206,32 +1251,20 @@ func grokRateLimitResetAt(snapshot *xai.QuotaSnapshot, now time.Time) (time.Time
 		}
 	}
 
-	exhausted := false
-	for _, window := range []*xai.QuotaWindow{snapshot.Requests, snapshot.Tokens} {
-		if window == nil || window.Remaining == nil || *window.Remaining > 0 {
-			continue
-		}
-		exhausted = true
-		candidate := time.Time{}
-		if window.ResetUnix != nil && *window.ResetUnix > 0 {
-			candidate = time.Unix(*window.ResetUnix, 0)
-		} else if parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(window.ResetAt)); err == nil {
-			candidate = parsed
-		}
-		if candidate.After(now) && candidate.After(resetAt) {
-			resetAt = candidate
-		}
+	if windowReset, ok := grokExhaustedWindowResetAt(snapshot, now); ok && windowReset.After(resetAt) {
+		resetAt = windowReset
 	}
 	if !resetAt.IsZero() {
 		return resetAt, true
 	}
 	// An observed Retry-After is an absolute boundary once combined with the
-	// snapshot timestamp. Do not turn an expired persisted snapshot into a new
-	// rolling fallback cooldown, but still allow a later explicit window reset.
+	// snapshot timestamp. Do not revive an expired persisted snapshot as a new
+	// short cooldown; only install a limit when the current observation still
+	// indicates an active 429 without a usable boundary.
 	if retryAfterExpired {
 		return time.Time{}, false
 	}
-	if exhausted || snapshot.StatusCode == http.StatusTooManyRequests {
+	if snapshot.StatusCode == http.StatusTooManyRequests {
 		return now.Add(grokRateLimitFallbackCooldown), true
 	}
 	return time.Time{}, false
@@ -1241,6 +1274,11 @@ func grokRateLimitResetAtForAccount(account *Account, snapshot *xai.QuotaSnapsho
 	resetAt, limited := grokRateLimitResetAt(snapshot, now)
 	if !limited || !isGrokOAuthAccount(account) || snapshot == nil || snapshot.StatusCode != http.StatusTooManyRequests {
 		return resetAt, limited
+	}
+	// Free-usage exhaustion already uses the window reset or the rolling 24h
+	// period; short adaptive OAuth backoff must not override it.
+	if isGrokFreeUsageExhaustedCode(snapshot.ErrorCode) {
+		return resetAt, true
 	}
 	if account.RateLimitedAt == nil || account.RateLimitResetAt == nil {
 		return resetAt, true
@@ -1341,6 +1379,40 @@ func (s *OpenAIGatewayService) rateLimitGrok(ctx context.Context, account *Accou
 	persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
 }
 
+
+const (
+	// GrokAccountSchedulingPausedReason marks upstream failures that already
+	// removed the current account from the schedulable pool. Failover must keep
+	// scanning remaining candidates without spending the generic switch budget.
+	GrokAccountSchedulingPausedReason GatewayFailureReason = "grok_account_scheduling_paused"
+)
+
+func (s *OpenAIGatewayService) newGrokUpstreamFailoverError(account *Account, statusCode int, headers http.Header, body []byte) *UpstreamFailoverError {
+	err := &UpstreamFailoverError{
+		StatusCode:             statusCode,
+		ResponseBody:           body,
+		ResponseHeaders:        headers.Clone(),
+		RetryableOnSameAccount: account != nil && account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode),
+	}
+	// Account already left the schedulable pool for these statuses; never same-account retry
+	// and do not burn the generic account-switch budget (see handler budget helper).
+	switch statusCode {
+	case http.StatusPaymentRequired, http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		err.RetryableOnSameAccount = false
+		err.Reason = GrokAccountSchedulingPausedReason
+		err.Scope = GatewayFailureScopeAccount
+		err.NextAccountAction = NextAccountRetry
+	}
+	return err
+}
+
+// IsGrokAccountSchedulingPaused reports failures that already paused the current
+// account (402 payment, 429 quota, 503 service-unavailable). Generic switch budget
+// must not be spent so one request can continue scanning healthy accounts.
+func (e *UpstreamFailoverError) IsGrokAccountSchedulingPaused() bool {
+	return e != nil && e.Reason == GrokAccountSchedulingPausedReason
+}
+
 func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte) {
 	if s == nil || account == nil {
 		return
@@ -1349,12 +1421,12 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		return
 	}
 	now := time.Now()
-	s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now))
+	s.updateGrokUsageSnapshot(ctx, account, parseGrokQuotaSnapshot(headers, statusCode, now, responseBody))
 	switch statusCode {
 	case http.StatusUnauthorized:
 		s.tempUnscheduleGrok(ctx, account, 10*time.Minute, "grok credentials unauthorized")
 	case http.StatusPaymentRequired:
-		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok payment required")
+		s.tempUnscheduleGrok(ctx, account, grokUpstreamPaymentRequiredCooldown, "grok payment required")
 	case http.StatusForbidden:
 		if s.applyGrokForbiddenPolicy(ctx, account, responseBody) {
 			return
@@ -1362,12 +1434,15 @@ func (s *OpenAIGatewayService) handleGrokAccountUpstreamError(ctx context.Contex
 		s.tempUnscheduleGrok(ctx, account, 30*time.Minute, "grok access or entitlement denied")
 	case http.StatusTooManyRequests:
 		// updateGrokUsageSnapshot installs both runtime and durable rate-limit state.
+		// Free-usage exhaustion is identified from the response body and uses the
+		// exhausted window reset, or grokFreeUsageExhaustedCooldown when absent.
+	case http.StatusServiceUnavailable:
+		s.tempUnscheduleGrok(ctx, account, grokUpstreamServiceUnavailableCooldown, "grok upstream service unavailable")
 	default:
 		if statusCode >= 500 {
-			s.tempUnscheduleGrok(ctx, account, 2*time.Minute, "grok upstream temporary error")
+			s.tempUnscheduleGrok(ctx, account, grokUpstreamTemporaryErrorCooldown, "grok upstream temporary error")
 		}
 	}
-	_ = responseBody
 }
 
 func (s *OpenAIGatewayService) tempUnscheduleGrok(ctx context.Context, account *Account, cooldown time.Duration, reason string) {

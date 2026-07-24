@@ -32,6 +32,10 @@ type QuotaSnapshot struct {
 	RetryAfterSeconds *int              `json:"retry_after_seconds,omitempty"`
 	SubscriptionTier  string            `json:"subscription_tier,omitempty"`
 	EntitlementStatus string            `json:"entitlement_status,omitempty"`
+	// ErrorCode is the upstream business error code (for example
+	// subscription:free-usage-exhausted). It is populated from the response
+	// body, not rate-limit headers.
+	ErrorCode         string            `json:"error_code,omitempty"`
 	StatusCode        int               `json:"status_code,omitempty"`
 	Headers           map[string]string `json:"headers,omitempty"`
 	HeadersObserved   bool              `json:"headers_observed"`

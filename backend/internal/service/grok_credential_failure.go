@@ -126,6 +126,10 @@ func (s *OpenAIGatewayService) getRequestCredential(ctx context.Context, c *gin.
 		})
 	}
 
+	// Happy-path token acquisition must NOT start the request-scoped credential
+	// failover budget. That budget exists only to bound credential-failure
+	// cascades (refresh storms). Upstream 402/429/503 after a successful token
+	// must remain free to scan remaining accounts without a 15s wall clock.
 	credentialCtx, cancel, budgetExpired := grokCredentialAcquisitionContext(ctx, c)
 	if cancel != nil {
 		defer cancel()
@@ -154,7 +158,17 @@ func (s *OpenAIGatewayService) getRequestCredential(ctx context.Context, c *gin.
 	if parentErr := ctx.Err(); parentErr != nil {
 		return "", "", parentErr
 	}
-	if credentialCtx.Err() != nil {
+	// First credential failure on this request starts the shared budget clock.
+	// Subsequent accounts share the remaining budget only for credential work.
+	startGrokCredentialFailoverBudget(c)
+	if cancel != nil {
+		cancel()
+	}
+	credentialCtx, cancel, budgetExpired = grokCredentialAcquisitionContext(ctx, c)
+	if cancel != nil {
+		defer cancel()
+	}
+	if budgetExpired || (credentialCtx.Err() != nil && ctx.Err() == nil) {
 		return "", "", s.newGrokCredentialFailover(c, account, grokCredentialFailureClass{
 			scope:   GatewayFailureScopeRequest,
 			reason:  GrokCredentialReasonFailoverTimeout,
@@ -214,17 +228,33 @@ func (s *OpenAIGatewayService) getRequestCredential(ctx context.Context, c *gin.
 	return "", "", s.newGrokCredentialFailover(c, account, class)
 }
 
+// startGrokCredentialFailoverBudget starts the request-scoped credential
+// failure budget once. It is intentionally lazy: successful token acquisitions
+// never start it, so upstream account scanning is not capped by this timer.
+func startGrokCredentialFailoverBudget(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	if raw, ok := c.Get(grokCredentialFailoverDeadlineKey); ok {
+		if deadline, _ := raw.(time.Time); !deadline.IsZero() {
+			return
+		}
+	}
+	c.Set(grokCredentialFailoverDeadlineKey, time.Now().Add(grokCredentialFailoverBudget))
+}
+
 func grokCredentialAcquisitionContext(ctx context.Context, c *gin.Context) (context.Context, context.CancelFunc, bool) {
 	if c == nil {
 		return ctx, nil, false
 	}
-	deadline := time.Time{}
-	if raw, ok := c.Get(grokCredentialFailoverDeadlineKey); ok {
-		deadline, _ = raw.(time.Time)
+	raw, ok := c.Get(grokCredentialFailoverDeadlineKey)
+	if !ok {
+		// Budget not started: happy-path token acquisition uses the parent context.
+		return ctx, nil, false
 	}
+	deadline, _ := raw.(time.Time)
 	if deadline.IsZero() {
-		deadline = time.Now().Add(grokCredentialFailoverBudget)
-		c.Set(grokCredentialFailoverDeadlineKey, deadline)
+		return ctx, nil, false
 	}
 	if !time.Now().Before(deadline) {
 		return ctx, nil, true

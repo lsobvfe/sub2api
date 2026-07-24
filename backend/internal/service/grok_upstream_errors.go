@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 )
 
 // isGrokContentPolicyRejection identifies request-scoped safety refusals from
@@ -87,6 +89,7 @@ func grokStructuredContentPolicyMarker(value any) bool {
 func normalizeGrokErrorMarker(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, ":", "_")
 	value = strings.ReplaceAll(value, " ", "_")
 	return value
 }
@@ -120,6 +123,29 @@ func isGrokAccountAccessCode(value string) bool {
 	default:
 		return false
 	}
+}
+
+// extractGrokUpstreamErrorCode returns the business error code from a Grok
+// upstream response body. Free-usage exhaustion is reported as a top-level
+// "code" field (subscription:free-usage-exhausted), not only error.code.
+func extractGrokUpstreamErrorCode(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if code := strings.TrimSpace(gjson.GetBytes(body, "code").String()); code != "" {
+		return code
+	}
+	if code := strings.TrimSpace(extractUpstreamErrorCode(body)); code != "" {
+		return code
+	}
+	return ""
+}
+
+// isGrokFreeUsageExhaustedCode reports the xAI free rolling-usage exhaustion
+// marker. Matching is normalized so subscription:free-usage-exhausted and
+// subscription_free_usage_exhausted are treated as the same signal.
+func isGrokFreeUsageExhaustedCode(value string) bool {
+	return normalizeGrokErrorMarker(value) == "subscription_free_usage_exhausted"
 }
 
 func grokAccountAccessMessage(value string) bool {

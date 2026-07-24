@@ -623,12 +623,7 @@ func (s *OpenAIGatewayService) forwardGrokChatCompletionsViaResponses(
 		})
 		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
-			return nil, &UpstreamFailoverError{
-				StatusCode:             resp.StatusCode,
-				ResponseBody:           respBody,
-				ResponseHeaders:        resp.Header.Clone(),
-				RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
-			}
+			return nil, s.newGrokUpstreamFailoverError(account, resp.StatusCode, resp.Header, respBody)
 		}
 		return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 	}

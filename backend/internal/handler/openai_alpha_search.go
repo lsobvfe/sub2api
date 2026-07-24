@@ -200,11 +200,12 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		if switchCount >= h.maxAccountSwitches {
+		nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, h.maxAccountSwitches, failoverErr)
+		if !shouldSwitch {
 			h.handleFailoverExhausted(c, failoverErr, false)
 			return
 		}
-		switchCount++
+		switchCount = nextSwitchCount
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			h.handleFailoverExhausted(c, failoverErr, false)
 			return
