@@ -1,0 +1,20 @@
+# Build artifacts & release drops
+build/
+dist/
+*.new
+
+# Runtime data (DB files, workdir, logs under data/)
+runtime/data/
+runtime/work/
+runtime/*.pid
+runtime/latest-backup-dir
+
+# Secrets — never commit real credentials
+runtime/sub2api.env
+runtime/**/config.yaml
+
+# Logs & backups
+logs/
+backups/
+*.log
+*.dump

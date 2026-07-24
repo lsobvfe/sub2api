@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# 1) git 提交 local-native / 工作区可提交变更
+# 2) 拉取 upstream 更新
+# 3) 构建前端 + 后端（必须 -tags embed）
+# 4) 重启 local-native 进程
+#
+# VS Code task: "sub2api: update and restart"
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LOCAL_NATIVE="$ROOT/local-native"
+BIN_DIR="$LOCAL_NATIVE/build"
+RUNTIME="$LOCAL_NATIVE/runtime"
+WORK="$RUNTIME/work"
+ENV_FILE="$RUNTIME/sub2api.env"
+LOG="$LOCAL_NATIVE/logs/sub2api-native.log"
+PID_FILE="$RUNTIME/sub2api-native.pid"
+OUT_BIN="$BIN_DIR/sub2api-source"
+UPSTREAM_REMOTE="${SUB2API_UPSTREAM_REMOTE:-upstream}"
+UPSTREAM_BRANCH="${SUB2API_UPSTREAM_BRANCH:-main}"
+
+log() { printf '[sub2api] %s\n' "$*"; }
+die() { printf '[sub2api] ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (copy from runtime/sub2api.env.example)"
+command -v go >/dev/null || die "go not found"
+command -v pnpm >/dev/null || die "pnpm not found"
+command -v git >/dev/null || die "git not found"
+command -v curl >/dev/null || die "curl not found"
+
+cd "$ROOT"
+git rev-parse --is-inside-work-tree >/dev/null || die "not a git repo: $ROOT"
+
+mkdir -p "$BIN_DIR" "$WORK" "$(dirname "$LOG")"
+
+# ── 1) Git: stage local-native + commit if needed ────────────
+log "git status (pre-commit)"
+git status --short || true
+
+# Only add paths that should be tracked (gitignore handles secrets/build)
+git add -A -- local-native
+
+if ! git diff --cached --quiet; then
+  # Refuse to stage secrets if somehow present
+  if git diff --cached --name-only | rg -q 'sub2api\.env$|config\.yaml$|\.dump$'; then
+    die "refusing to commit secrets/dumps; check gitignore"
+  fi
+  MSG="chore(local-native): sync scripts and ignore runtime artifacts"
+  log "committing: $MSG"
+  git commit -m "$MSG"
+else
+  log "nothing to commit under local-native"
+fi
+
+# ── 2) Fetch + merge upstream ────────────────────────────────
+if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
+  log "fetch $UPSTREAM_REMOTE"
+  git fetch "$UPSTREAM_REMOTE" --prune
+  CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  log "merge $UPSTREAM_REMOTE/$UPSTREAM_BRANCH into $CURRENT_BRANCH"
+  if ! git merge --no-edit "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"; then
+    die "merge conflict with $UPSTREAM_REMOTE/$UPSTREAM_BRANCH — resolve manually then re-run"
+  fi
+else
+  log "WARNING: remote '$UPSTREAM_REMOTE' missing; skip pull"
+fi
+
+# ── 3) Build frontend ────────────────────────────────────────
+log "building frontend…"
+if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
+  pnpm --dir "$ROOT/frontend" install
+fi
+pnpm --dir "$ROOT/frontend" run build
+
+WEB_DIST="$ROOT/backend/internal/web/dist"
+rm -rf "$WEB_DIST"
+mkdir -p "$WEB_DIST"
+cp -a "$ROOT/frontend/dist/." "$WEB_DIST/"
+[[ -f "$WEB_DIST/index.html" ]] || die "frontend dist missing index.html"
+
+# ── 4) Build backend with -tags embed ────────────────────────
+log "building backend (-tags embed)…"
+VERSION="$(cd "$ROOT/backend" && ./scripts/resolve-version.sh 2>/dev/null || date +%Y%m%d%H%M)"
+LDFLAGS="-s -w -X main.Version=${VERSION}"
+TMP_BIN="$BIN_DIR/sub2api-source.new"
+(
+  cd "$ROOT/backend"
+  CGO_ENABLED=0 go build -tags embed -ldflags="$LDFLAGS" -trimpath -o "$TMP_BIN" ./cmd/server
+)
+
+if strings "$TMP_BIN" | rg -q 'Frontend not embedded'; then
+  rm -f "$TMP_BIN"
+  die "binary lacks embed frontend (build without -tags embed)"
+fi
+
+# ── 5) Restart ───────────────────────────────────────────────
+log "stopping old process…"
+mapfile -t OLD_PIDS < <(pgrep -x sub2api-source || true)
+for p in "${OLD_PIDS[@]:-}"; do
+  [[ -z "${p:-}" ]] && continue
+  kill "$p" 2>/dev/null || true
+done
+sleep 2
+for p in "${OLD_PIDS[@]:-}"; do
+  [[ -z "${p:-}" ]] && continue
+  if [[ -d "/proc/$p" ]]; then
+    kill -9 "$p" 2>/dev/null || true
+  fi
+done
+sleep 1
+
+if [[ -f "$OUT_BIN" ]]; then
+  cp -af "$OUT_BIN" "$BIN_DIR/sub2api-source.previous"
+fi
+mv -f "$TMP_BIN" "$OUT_BIN"
+chmod +x "$OUT_BIN"
+
+log "starting…"
+cd "$WORK"
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+nohup "$OUT_BIN" >>"$LOG" 2>&1 &
+echo $! | tee "$PID_FILE"
+NEW_PID=$(cat "$PID_FILE")
+PORT="${SERVER_PORT:-18081}"
+
+for _ in $(seq 1 40); do
+  if curl -fsS -m 1 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$NEW_PID" 2>/dev/null; then
+    tail -50 "$LOG" >&2 || true
+    die "process exited during startup"
+  fi
+  sleep 0.5
+done
+
+ROOT_CODE=$(curl -sS -m 5 -o /tmp/sub2api-root.html -w "%{http_code}" "http://127.0.0.1:${PORT}/" || echo 000)
+HEALTH_CODE=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/health" || echo 000)
+log "health=$HEALTH_CODE root=$ROOT_CODE pid=$NEW_PID"
+
+[[ "$HEALTH_CODE" == "200" ]] || die "health check failed"
+if [[ "$ROOT_CODE" != "200" ]] || ! rg -q '<!doctype html>|<title>' /tmp/sub2api-root.html; then
+  head -c 200 /tmp/sub2api-root.html >&2 || true
+  echo >&2
+  die "frontend not serving HTML (HTTP $ROOT_CODE) — embed build broken?"
+fi
+
+log "OK — committed (if needed), upstream merged, built with embed, restarted"
