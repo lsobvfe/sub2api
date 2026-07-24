@@ -71,13 +71,21 @@ log "building frontend…"
 if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
   pnpm --dir "$ROOT/frontend" install
 fi
-pnpm --dir "$ROOT/frontend" run build
 
 WEB_DIST="$ROOT/backend/internal/web/dist"
-rm -rf "$WEB_DIST"
-mkdir -p "$WEB_DIST"
-cp -a "$ROOT/frontend/dist/." "$WEB_DIST/"
-[[ -f "$WEB_DIST/index.html" ]] || die "frontend dist missing index.html"
+# Vite outDir is backend/internal/web/dist (see frontend/vite.config).
+# Do NOT delete WEB_DIST after build — that wiped the embed payload previously.
+pnpm --dir "$ROOT/frontend" run build
+
+if [[ ! -f "$WEB_DIST/index.html" ]]; then
+  # Fallback if outDir ever points at frontend/dist
+  if [[ -f "$ROOT/frontend/dist/index.html" ]]; then
+    rm -rf "$WEB_DIST"
+    mkdir -p "$WEB_DIST"
+    cp -a "$ROOT/frontend/dist/." "$WEB_DIST/"
+  fi
+fi
+[[ -f "$WEB_DIST/index.html" ]] || die "frontend dist missing index.html at $WEB_DIST"
 
 # ── 4) Build backend with -tags embed ────────────────────────
 log "building backend (-tags embed)…"
