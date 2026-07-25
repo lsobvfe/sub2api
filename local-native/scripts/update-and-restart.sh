@@ -119,8 +119,34 @@ if strings "$TMP_BIN" | rg -q 'Frontend not embedded'; then
 fi
 
 # ── 5) Restart ───────────────────────────────────────────────
-log "stopping old process…"
-mapfile -t OLD_PIDS < <(pgrep -x sub2api-source || true)
+# Load env first so SERVER_PORT matches the running instance.
+set -a
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+set +a
+PORT="${SERVER_PORT:-18081}"
+
+# Collect candidate PIDs from pidfile, process name, binary path, and
+# the configured listen port. `pgrep -x sub2api-source` alone is not
+# enough: a leftover listener makes the new process exit on bind.
+log "stopping old process (port ${PORT})…"
+declare -A SEEN_PIDS=()
+collect_pid() {
+  local p="$1"
+  [[ -n "$p" && "$p" =~ ^[0-9]+$ ]] || return 0
+  # Never signal this script or its parent shell.
+  [[ "$p" == "$$" || "$p" == "$PPID" ]] && return 0
+  SEEN_PIDS["$p"]=1
+}
+if [[ -f "$PID_FILE" ]]; then
+  collect_pid "$(tr -d '[:space:]' <"$PID_FILE" 2>/dev/null || true)"
+fi
+while read -r p; do collect_pid "$p"; done < <(pgrep -x sub2api-source 2>/dev/null || true)
+while read -r p; do collect_pid "$p"; done < <(pgrep -f 'local-native/build/sub2api-source' 2>/dev/null || true)
+while read -r p; do collect_pid "$p"; done < <(
+  ss -ltnp "sport = :${PORT}" 2>/dev/null | rg -o 'pid=[0-9]+' | cut -d= -f2 || true
+)
+OLD_PIDS=("${!SEEN_PIDS[@]}")
 for p in "${OLD_PIDS[@]:-}"; do
   [[ -z "${p:-}" ]] && continue
   kill "$p" 2>/dev/null || true
@@ -132,7 +158,21 @@ for p in "${OLD_PIDS[@]:-}"; do
     kill -9 "$p" 2>/dev/null || true
   fi
 done
-sleep 1
+# Final port sweep: anything still listening must go before we bind.
+for _ in $(seq 1 10); do
+  mapfile -t PORT_PIDS < <(ss -ltnp "sport = :${PORT}" 2>/dev/null | rg -o 'pid=[0-9]+' | cut -d= -f2 || true)
+  if [[ ${#PORT_PIDS[@]} -eq 0 ]]; then
+    break
+  fi
+  for p in "${PORT_PIDS[@]}"; do
+    [[ "$p" == "$$" || "$p" == "$PPID" ]] && continue
+    kill -9 "$p" 2>/dev/null || true
+  done
+  sleep 0.5
+done
+if ss -ltn "sport = :${PORT}" 2>/dev/null | rg -q ":${PORT}\\b"; then
+  die "port ${PORT} still in use after stop attempts"
+fi
 
 if [[ -f "$OUT_BIN" ]]; then
   cp -af "$OUT_BIN" "$BIN_DIR/sub2api-source.previous"
@@ -142,14 +182,9 @@ chmod +x "$OUT_BIN"
 
 log "starting…"
 cd "$WORK"
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
 nohup "$OUT_BIN" >>"$LOG" 2>&1 &
 echo $! | tee "$PID_FILE"
 NEW_PID=$(cat "$PID_FILE")
-PORT="${SERVER_PORT:-18081}"
 
 for _ in $(seq 1 40); do
   if curl -fsS -m 1 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
