@@ -351,6 +351,16 @@ export default {
         allowUngroupedKey: '允许未分组 Key 调度',
         allowUngroupedKeyHint: '关闭后，未分配到任何分组的 API Key 将无法发起请求（返回 403）。建议保持关闭以确保所有 Key 都归属明确的分组。'
       },
+      openaiStreamHold: {
+        title: 'OpenAI 流式持续等待',
+        description: '控制流式 Responses 请求在账号暂不可用、并发受限或上游临时失败时是否保持连接并持续重试。',
+        enabled: '启用流式持续等待',
+        enabledHint: '切换后立即生效。开启时发送 SSE 心跳保持连接；关闭时恢复正常错误响应。',
+        enabledSuccess: 'OpenAI 流式持续等待已启用',
+        disabledSuccess: 'OpenAI 流式持续等待已停用',
+        loadFailed: '无法读取流式持续等待运行状态',
+        saveFailed: '更新流式持续等待状态失败'
+      },
       upstreamBillingProbe: {
         title: '上游倍率自动探测',
         description: '定期获取 OpenAI API Key 所连接上游 Sub2API 站点声明的计费倍率。',

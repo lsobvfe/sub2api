@@ -358,6 +358,16 @@ export default {
         allowUngroupedKey: 'Allow Ungrouped Key Scheduling',
         allowUngroupedKeyHint: 'When disabled, API Keys not assigned to any group cannot make requests (403 Forbidden). Keep disabled to ensure all Keys belong to a specific group.'
       },
+      openaiStreamHold: {
+        title: 'OpenAI Streaming Hold',
+        description: 'Control whether streaming Responses requests stay connected and retry while accounts are unavailable, concurrency is saturated, or upstream failures are temporary.',
+        enabled: 'Enable streaming hold',
+        enabledHint: 'Changes take effect immediately. When enabled, SSE heartbeats keep the connection alive; when disabled, normal error responses resume.',
+        enabledSuccess: 'OpenAI streaming hold enabled',
+        disabledSuccess: 'OpenAI streaming hold disabled',
+        loadFailed: 'Unable to load the streaming hold runtime state',
+        saveFailed: 'Failed to update the streaming hold state'
+      },
       upstreamBillingProbe: {
         title: 'Upstream Rate Auto Detection',
         description: 'Periodically retrieve billing rates declared by upstream Sub2API sites connected to OpenAI API keys.',

@@ -28,7 +28,8 @@ const (
 )
 
 type openAIStreamHoldController struct {
-	enabled           bool
+	configured        bool
+	runtimeEnabled    func() bool
 	keepaliveInterval time.Duration
 	minRetryInterval  time.Duration
 	maxRetryInterval  time.Duration
@@ -40,13 +41,18 @@ type openAIStreamHoldController struct {
 	keepaliveCount    int
 }
 
-func newOpenAIStreamHoldController(cfg *config.Config, stream bool) *openAIStreamHoldController {
+func newOpenAIStreamHoldController(
+	cfg *config.Config,
+	stream bool,
+	runtimeEnabled func() bool,
+) *openAIStreamHoldController {
 	controller := &openAIStreamHoldController{}
-	if cfg == nil || !stream || !cfg.Gateway.OpenAIStreamHold.Enabled {
+	if cfg == nil || !stream || runtimeEnabled == nil {
 		return controller
 	}
 	hold := cfg.Gateway.OpenAIStreamHold
-	controller.enabled = true
+	controller.configured = true
+	controller.runtimeEnabled = runtimeEnabled
 	controller.keepaliveInterval = hold.KeepaliveInterval
 	controller.minRetryInterval = hold.MinRetryInterval
 	controller.maxRetryInterval = hold.MaxRetryInterval
@@ -58,7 +64,7 @@ func newOpenAIStreamHoldController(cfg *config.Config, stream bool) *openAIStrea
 }
 
 func (h *openAIStreamHoldController) Enabled() bool {
-	return h != nil && h.enabled
+	return h != nil && h.configured && h.runtimeEnabled != nil && h.runtimeEnabled()
 }
 
 func (h *openAIStreamHoldController) Wait(
@@ -68,7 +74,11 @@ func (h *openAIStreamHoldController) Wait(
 	retryAfter time.Duration,
 	streamStarted *bool,
 ) bool {
-	if !h.Enabled() || c == nil || c.Request == nil || c.Writer == nil {
+	if !h.Enabled() {
+		h.logDisabled(reqLog, reason)
+		return false
+	}
+	if c == nil || c.Request == nil || c.Writer == nil {
 		return false
 	}
 	ctx := c.Request.Context()
@@ -131,6 +141,10 @@ func (h *openAIStreamHoldController) Wait(
 			}
 			return false
 		case <-timer.C:
+			if !h.Enabled() {
+				h.logDisabled(reqLog, reason)
+				return false
+			}
 			if deadlineLimited {
 				h.logDeadline(reqLog, reason)
 				return false
@@ -146,6 +160,10 @@ func (h *openAIStreamHoldController) Wait(
 			}
 			return true
 		case <-ticker.C:
+			if !h.Enabled() {
+				h.logDisabled(reqLog, reason)
+				return false
+			}
 			if err := h.writeKeepalive(c, reqLog, reason, streamStarted); err != nil {
 				return false
 			}
@@ -191,11 +209,23 @@ func (h *openAIStreamHoldController) jitteredRetryInterval(base time.Duration) t
 }
 
 func (h *openAIStreamHoldController) Recovered(reqLog *zap.Logger, accountID int64) {
-	if !h.Enabled() || h.waitCount == 0 || reqLog == nil {
+	if h == nil || !h.configured || h.waitCount == 0 || reqLog == nil {
 		return
 	}
 	reqLog.Info("openai.stream_hold_recovered",
 		zap.Int64("account_id", accountID),
+		zap.Int("hold_cycles", h.waitCount),
+		zap.Int("keepalive_count", h.keepaliveCount),
+		zap.Duration("held_for", time.Since(h.startedAt)),
+	)
+}
+
+func (h *openAIStreamHoldController) logDisabled(reqLog *zap.Logger, reason openAIStreamHoldReason) {
+	if h == nil || h.waitCount == 0 || reqLog == nil {
+		return
+	}
+	reqLog.Info("openai.stream_hold_disabled",
+		zap.String("reason", string(reason)),
 		zap.Int("hold_cycles", h.waitCount),
 		zap.Int("keepalive_count", h.keepaliveCount),
 		zap.Duration("held_for", time.Since(h.startedAt)),
@@ -211,6 +241,10 @@ func (h *openAIStreamHoldController) advanceBackoff() {
 		next = h.maxRetryInterval
 	}
 	h.nextRetryInterval = next
+}
+
+func (h *OpenAIGatewayHandler) openAIStreamHoldEnabled() bool {
+	return h != nil && h.gatewayService != nil && h.gatewayService.OpenAIStreamHoldEnabled()
 }
 
 func (h *openAIStreamHoldController) logDeadline(reqLog *zap.Logger, reason openAIStreamHoldReason) {

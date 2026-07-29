@@ -539,6 +539,9 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		adminSettings.GET("/admin-api-key", h.Admin.Setting.GetAdminAPIKey)
 		adminSettings.POST("/admin-api-key/regenerate", h.Admin.Setting.RegenerateAdminAPIKey)
 		adminSettings.DELETE("/admin-api-key", h.Admin.Setting.DeleteAdminAPIKey)
+		// OpenAI 流式等待运行时开关
+		adminSettings.GET("/openai-stream-hold", h.Admin.Setting.GetOpenAIStreamHoldSettings)
+		adminSettings.PUT("/openai-stream-hold", h.Admin.Setting.UpdateOpenAIStreamHoldSettings)
 		// 529过载冷却配置
 		adminSettings.GET("/overload-cooldown", h.Admin.Setting.GetOverloadCooldownSettings)
 		adminSettings.PUT("/overload-cooldown", h.Admin.Setting.UpdateOverloadCooldownSettings)

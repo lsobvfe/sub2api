@@ -744,12 +744,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 }
 
 func (s *OpenAIGatewayService) openAIResponsesStreamHoldEnabled(c *gin.Context) bool {
-	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIStreamHold.Enabled ||
-		c == nil || c.Request == nil || c.Request.URL == nil {
+	if !s.OpenAIStreamHoldEnabled() || c == nil || c.Request == nil || c.Request.URL == nil {
 		return false
 	}
 	path := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
 	return strings.HasSuffix(path, "/responses") || strings.Contains(path, "/responses/")
+}
+
+func (s *OpenAIGatewayService) OpenAIStreamHoldEnabled() bool {
+	return s != nil && s.settingService != nil && s.settingService.IsOpenAIStreamHoldEnabled()
 }
 
 func (s *OpenAIGatewayService) withOpenAIResponsesStreamHoldTransport(

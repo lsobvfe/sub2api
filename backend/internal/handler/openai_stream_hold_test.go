@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,13 +35,13 @@ func testOpenAIStreamHoldConfig() config.GatewayOpenAIStreamHoldConfig {
 
 func TestOpenAIStreamHoldDisabledForNonStreamingRequests(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIStreamHold: testOpenAIStreamHoldConfig()}}
-	require.False(t, newOpenAIStreamHoldController(cfg, false).Enabled())
+	require.False(t, newOpenAIStreamHoldController(cfg, false, func() bool { return true }).Enabled())
 }
 
 func TestOpenAIStreamHoldWaitSendsKeepaliveAndRetries(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIStreamHold: testOpenAIStreamHoldConfig()}}
-	hold := newOpenAIStreamHoldController(cfg, true)
+	hold := newOpenAIStreamHoldController(cfg, true, func() bool { return true })
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
@@ -57,7 +58,7 @@ func TestOpenAIStreamHoldWaitSendsKeepaliveAndRetries(t *testing.T) {
 func TestOpenAIStreamHoldWaitStopsOnClientCancellation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIStreamHold: testOpenAIStreamHoldConfig()}}
-	hold := newOpenAIStreamHoldController(cfg, true)
+	hold := newOpenAIStreamHoldController(cfg, true, func() bool { return true })
 	ctx, cancel := context.WithCancel(context.Background())
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -76,6 +77,32 @@ func TestOpenAIStreamHoldWaitStopsOnClientCancellation(t *testing.T) {
 		require.False(t, retry)
 	case <-time.After(time.Second):
 		t.Fatal("stream hold did not stop after client cancellation")
+	}
+}
+
+func TestOpenAIStreamHoldWaitStopsWhenRuntimeIsDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIStreamHold: testOpenAIStreamHoldConfig()}}
+	var enabled atomic.Bool
+	enabled.Store(true)
+	hold := newOpenAIStreamHoldController(cfg, true, enabled.Load)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	streamStarted := false
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- hold.Wait(c, nil, openAIStreamHoldNoAccount, 0, &streamStarted)
+	}()
+	time.Sleep(8 * time.Millisecond)
+	enabled.Store(false)
+
+	select {
+	case retry := <-done:
+		require.False(t, retry)
+	case <-time.After(time.Second):
+		t.Fatal("stream hold did not stop after runtime disable")
 	}
 }
 
@@ -124,9 +151,11 @@ func (u *openAIStreamHoldRecoveryUpstream) responseHeaderTimeouts() []time.Durat
 func TestOpenAIResponsesStreamHoldRecoversAfterFailoverExhaustion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := &openAIStreamHoldRecoveryUpstream{}
-	handler := newOpenAIResponsesFailoverTestHandler(t, upstream)
+	handler := newOpenAIResponsesFailoverTestHandlerWithConfig(t, upstream, func(cfg *config.Config) {
+		cfg.Gateway.OpenAIStreamHold = testOpenAIStreamHoldConfig()
+	})
 	handler.maxAccountSwitches = 1
-	handler.cfg.Gateway.OpenAIStreamHold = testOpenAIStreamHoldConfig()
+	require.True(t, handler.gatewayService.OpenAIStreamHoldEnabled())
 
 	groupID := int64(3131)
 	router := gin.New()
@@ -160,7 +189,7 @@ func TestOpenAIResponsesStreamHoldRecoversAfterFailoverExhaustion(t *testing.T) 
 	responseBody, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body=%s calls=%d timeouts=%v", responseBody, upstream.callCount(), upstream.responseHeaderTimeouts())
 	require.Equal(t, 3, upstream.callCount())
 	require.Equal(t, []time.Duration{
 		15 * time.Millisecond,

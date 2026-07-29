@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -50,6 +51,14 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 }
 
 func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
+	return newOpenAIResponsesFailoverTestHandlerWithConfig(t, upstream, nil)
+}
+
+func newOpenAIResponsesFailoverTestHandlerWithConfig(
+	t *testing.T,
+	upstream service.HTTPUpstream,
+	configure func(*config.Config),
+) *OpenAIGatewayHandler {
 	t.Helper()
 	accounts := []service.Account{
 		{
@@ -77,6 +86,17 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 	}
 	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
+	if configure != nil {
+		configure(cfg)
+	}
+	var settingService *service.SettingService
+	if configure != nil {
+		settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
+			service.SettingKeyOpenAIStreamHoldEnabled: strconv.FormatBool(cfg.Gateway.OpenAIStreamHold.Enabled),
+		}}
+		settingService = service.NewSettingService(settingRepo, cfg)
+		require.NoError(t, settingService.LoadOpenAIStreamHoldRuntime(context.Background()))
+	}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -98,7 +118,7 @@ func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUp
 		nil,
 		nil,
 		nil,
-		nil,
+		settingService,
 		nil,
 	)
 	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)

@@ -1170,6 +1170,29 @@ export async function deleteAdminApiKey(): Promise<{ message: string }> {
   return data;
 }
 
+// ==================== OpenAI Stream Hold Settings ====================
+
+export interface OpenAIStreamHoldSettings {
+  enabled: boolean;
+}
+
+export async function getOpenAIStreamHoldSettings(): Promise<OpenAIStreamHoldSettings> {
+  const { data } = await apiClient.get<OpenAIStreamHoldSettings>(
+    "/admin/settings/openai-stream-hold",
+  );
+  return data;
+}
+
+export async function updateOpenAIStreamHoldSettings(
+  settings: OpenAIStreamHoldSettings,
+): Promise<OpenAIStreamHoldSettings> {
+  const { data } = await apiClient.put<OpenAIStreamHoldSettings>(
+    "/admin/settings/openai-stream-hold",
+    settings,
+  );
+  return data;
+}
+
 // ==================== Overload Cooldown Settings ====================
 
 /**
@@ -1476,6 +1499,8 @@ export const settingsAPI = {
   getAdminApiKey,
   regenerateAdminApiKey,
   deleteAdminApiKey,
+  getOpenAIStreamHoldSettings,
+  updateOpenAIStreamHoldSettings,
   getOverloadCooldownSettings,
   updateOverloadCooldownSettings,
   getRateLimit429CooldownSettings,
