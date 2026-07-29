@@ -353,9 +353,9 @@ export default {
       },
       openaiStreamHold: {
         title: 'OpenAI 流式持续等待',
-        description: '控制流式 Responses 请求在账号暂不可用、并发受限或上游临时失败时是否保持连接并持续重试。',
+        description: '控制流式 Responses 请求在账号暂不可用、并发受限或上游临时失败时是否保持请求挂起并持续重试。',
         enabled: '启用流式持续等待',
-        enabledHint: '切换后立即生效。开启时发送 SSE 心跳保持连接；关闭时恢复正常错误响应。',
+        enabledHint: '切换后立即生效。开启时仅在获得真实上游响应后才开始 HTTP/SSE 响应；关闭时恢复正常错误响应。',
         enabledSuccess: 'OpenAI 流式持续等待已启用',
         disabledSuccess: 'OpenAI 流式持续等待已停用',
         loadFailed: '无法读取流式持续等待运行状态',

@@ -360,9 +360,9 @@ export default {
       },
       openaiStreamHold: {
         title: 'OpenAI Streaming Hold',
-        description: 'Control whether streaming Responses requests stay connected and retry while accounts are unavailable, concurrency is saturated, or upstream failures are temporary.',
+        description: 'Control whether streaming Responses requests remain pending and retry while accounts are unavailable, concurrency is saturated, or upstream failures are temporary.',
         enabled: 'Enable streaming hold',
-        enabledHint: 'Changes take effect immediately. When enabled, SSE heartbeats keep the connection alive; when disabled, normal error responses resume.',
+        enabledHint: 'Changes take effect immediately. When enabled, the HTTP/SSE response starts only after a real upstream response is available; when disabled, normal error responses resume.',
         enabledSuccess: 'OpenAI streaming hold enabled',
         disabledSuccess: 'OpenAI streaming hold disabled',
         loadFailed: 'Unable to load the streaming hold runtime state',

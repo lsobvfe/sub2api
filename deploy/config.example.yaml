@@ -467,14 +467,13 @@ gateway:
   # Non-streaming Images JSON keepalive interval (seconds), 0=disable; commits HTTP 200 after the first heartbeat
   # 图片非流式 JSON keepalive 间隔（秒），0=禁用；首个心跳后 HTTP 状态会固化为 200
   image_nonstream_keepalive_interval: 0
-  # Keep streaming Responses requests open across temporary scheduling/upstream failures.
-  # Retries only happen before the first semantic output; 0s max_duration waits until
-  # success or client cancellation.
-  # 在首个语义输出前遇到临时调度/上游故障时持续等待；max_duration=0s 表示
-  # 一直等待到成功或客户端断开。
+  # Keep streaming Responses requests pending across temporary scheduling/upstream failures.
+  # The HTTP/SSE response is not started before real semantic output; 0s max_duration
+  # waits until success or client cancellation.
+  # 在首个真实语义输出前不提交 HTTP/SSE 响应；max_duration=0s 表示一直等待到
+  # 成功或客户端断开。
   openai_stream_hold:
     enabled: false
-    keepalive_interval: 10s
     response_header_timeout: 10s
     min_retry_interval: 1s
     max_retry_interval: 30s

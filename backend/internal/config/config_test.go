@@ -1907,13 +1907,8 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be non-negative",
 		},
 		{
-			name:    "gateway openai stream hold keepalive too small",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.KeepaliveInterval = 4 * time.Second },
-			wantErr: "gateway.openai_stream_hold.keepalive_interval",
-		},
-		{
-			name:    "gateway openai stream hold response header timeout too large",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.ResponseHeaderTimeout = 11 * time.Second },
+			name:    "gateway openai stream hold response header timeout too small",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.ResponseHeaderTimeout = 500 * time.Millisecond },
 			wantErr: "gateway.openai_stream_hold.response_header_timeout",
 		},
 		{
@@ -2557,9 +2552,6 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.OpenAIStreamHold.Enabled {
 		t.Fatal("openai_stream_hold.enabled = true, want false")
-	}
-	if cfg.Gateway.OpenAIStreamHold.KeepaliveInterval != 10*time.Second {
-		t.Fatalf("openai_stream_hold.keepalive_interval = %s, want 10s", cfg.Gateway.OpenAIStreamHold.KeepaliveInterval)
 	}
 	if cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout != 10*time.Second {
 		t.Fatalf("openai_stream_hold.response_header_timeout = %s, want 10s", cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout)

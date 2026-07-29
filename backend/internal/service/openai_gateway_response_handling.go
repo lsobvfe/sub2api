@@ -201,9 +201,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		firstOutputTimer = nil
 		firstOutputCh = nil
 	}
-	// Track downstream writes separately from upstream reads: pre-output failover
-	// can buffer response.created / response.in_progress, so keepalive must be
-	// based on downstream idle time.
+	// Track downstream writes separately from upstream reads.
 	lastDownstreamWriteAt := time.Now()
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱。
@@ -709,22 +707,17 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if clientDisconnected {
 				continue
 			}
+			// Stream-hold must not commit HTTP/SSE before the first semantic
+			// output. Codex starts its SSE idle watchdog when the response begins
+			// and intentionally ignores comments, so comment keepalives would
+			// eventually force a reconnect.
+			if guardFirstOutput && firstTokenMs == nil {
+				continue
+			}
 			if eventInProgress {
 				continue
 			}
 			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
-				continue
-			}
-			if guardFirstOutput {
-				// Bypass attempt-local buffered frames. The stable SSE headers may be
-				// committed here, but account headers remain private until semantic output.
-				if _, err := w.Write([]byte(":\n\n")); err != nil {
-					clientDisconnected = true
-					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
-					continue
-				}
-				flusher.Flush()
-				lastDownstreamWriteAt = time.Now()
 				continue
 			}
 			if _, err := writePendingString(":\n\n"); err != nil {

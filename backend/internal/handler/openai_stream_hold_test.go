@@ -24,7 +24,6 @@ import (
 func testOpenAIStreamHoldConfig() config.GatewayOpenAIStreamHoldConfig {
 	return config.GatewayOpenAIStreamHoldConfig{
 		Enabled:               true,
-		KeepaliveInterval:     5 * time.Millisecond,
 		ResponseHeaderTimeout: 15 * time.Millisecond,
 		MinRetryInterval:      20 * time.Millisecond,
 		MaxRetryInterval:      40 * time.Millisecond,
@@ -38,20 +37,18 @@ func TestOpenAIStreamHoldDisabledForNonStreamingRequests(t *testing.T) {
 	require.False(t, newOpenAIStreamHoldController(cfg, false, func() bool { return true }).Enabled())
 }
 
-func TestOpenAIStreamHoldWaitSendsKeepaliveAndRetries(t *testing.T) {
+func TestOpenAIStreamHoldWaitDefersResponseAndRetries(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{Gateway: config.GatewayConfig{OpenAIStreamHold: testOpenAIStreamHoldConfig()}}
 	hold := newOpenAIStreamHoldController(cfg, true, func() bool { return true })
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	streamStarted := false
-
-	require.True(t, hold.Wait(c, nil, openAIStreamHoldNoAccount, 0, &streamStarted))
-	require.True(t, streamStarted)
-	require.True(t, recorder.Flushed)
-	require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
-	require.GreaterOrEqual(t, strings.Count(recorder.Body.String(), string(SSEPingFormatComment)), 1)
+	require.True(t, hold.Wait(c, nil, openAIStreamHoldNoAccount, 0))
+	require.False(t, c.Writer.Written())
+	require.False(t, recorder.Flushed)
+	require.Empty(t, recorder.Header())
+	require.Empty(t, recorder.Body.String())
 	require.Equal(t, 40*time.Millisecond, hold.nextRetryInterval)
 }
 
@@ -63,11 +60,9 @@ func TestOpenAIStreamHoldWaitStopsOnClientCancellation(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
-	streamStarted := false
-
 	done := make(chan bool, 1)
 	go func() {
-		done <- hold.Wait(c, nil, openAIStreamHoldNoAccount, 0, &streamStarted)
+		done <- hold.Wait(c, nil, openAIStreamHoldNoAccount, 0)
 	}()
 	time.Sleep(8 * time.Millisecond)
 	cancel()
@@ -89,11 +84,9 @@ func TestOpenAIStreamHoldWaitStopsWhenRuntimeIsDisabled(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	streamStarted := false
-
 	done := make(chan bool, 1)
 	go func() {
-		done <- hold.Wait(c, nil, openAIStreamHoldNoAccount, 0, &streamStarted)
+		done <- hold.Wait(c, nil, openAIStreamHoldNoAccount, 0)
 	}()
 	time.Sleep(8 * time.Millisecond)
 	enabled.Store(false)
@@ -196,7 +189,7 @@ func TestOpenAIResponsesStreamHoldRecoversAfterFailoverExhaustion(t *testing.T) 
 		15 * time.Millisecond,
 		15 * time.Millisecond,
 	}, upstream.responseHeaderTimeouts())
-	require.Contains(t, string(responseBody), string(SSEPingFormatComment))
+	require.NotContains(t, string(responseBody), string(SSEPingFormatComment))
 	require.Contains(t, string(responseBody), `"type":"response.completed"`)
 	require.Contains(t, string(responseBody), `"id":"resp_hold_recovered"`)
 	require.NotContains(t, string(responseBody), `"type":"response.failed"`)

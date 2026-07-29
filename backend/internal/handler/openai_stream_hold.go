@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -30,7 +29,6 @@ const (
 type openAIStreamHoldController struct {
 	configured        bool
 	runtimeEnabled    func() bool
-	keepaliveInterval time.Duration
 	minRetryInterval  time.Duration
 	maxRetryInterval  time.Duration
 	retryJitterRatio  float64
@@ -38,7 +36,6 @@ type openAIStreamHoldController struct {
 	startedAt         time.Time
 	nextRetryInterval time.Duration
 	waitCount         int
-	keepaliveCount    int
 }
 
 func newOpenAIStreamHoldController(
@@ -53,7 +50,6 @@ func newOpenAIStreamHoldController(
 	hold := cfg.Gateway.OpenAIStreamHold
 	controller.configured = true
 	controller.runtimeEnabled = runtimeEnabled
-	controller.keepaliveInterval = hold.KeepaliveInterval
 	controller.minRetryInterval = hold.MinRetryInterval
 	controller.maxRetryInterval = hold.MaxRetryInterval
 	controller.retryJitterRatio = hold.RetryJitterRatio
@@ -72,13 +68,12 @@ func (h *openAIStreamHoldController) Wait(
 	reqLog *zap.Logger,
 	reason openAIStreamHoldReason,
 	retryAfter time.Duration,
-	streamStarted *bool,
 ) bool {
 	if !h.Enabled() {
 		h.logDisabled(reqLog, reason)
 		return false
 	}
-	if c == nil || c.Request == nil || c.Writer == nil {
+	if c == nil || c.Request == nil {
 		return false
 	}
 	ctx := c.Request.Context()
@@ -110,9 +105,6 @@ func (h *openAIStreamHoldController) Wait(
 	}
 
 	h.waitCount++
-	if err := h.writeKeepalive(c, reqLog, reason, streamStarted); err != nil {
-		return false
-	}
 	if reqLog != nil {
 		reqLog.Warn("openai.stream_hold_waiting",
 			zap.String("reason", string(reason)),
@@ -120,13 +112,18 @@ func (h *openAIStreamHoldController) Wait(
 			zap.Duration("retry_delay", delay),
 			zap.Duration("held_for", time.Since(h.startedAt)),
 			zap.Duration("max_duration", h.maxDuration),
+			zap.Bool("downstream_response_deferred", true),
 		)
 	}
 
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
-	ticker := time.NewTicker(h.keepaliveInterval)
-	defer ticker.Stop()
+	stateCheckInterval := min(h.minRetryInterval, delay)
+	if stateCheckInterval <= 0 {
+		stateCheckInterval = delay
+	}
+	stateCheckTicker := time.NewTicker(stateCheckInterval)
+	defer stateCheckTicker.Stop()
 
 	for {
 		select {
@@ -159,45 +156,13 @@ func (h *openAIStreamHoldController) Wait(
 				)
 			}
 			return true
-		case <-ticker.C:
+		case <-stateCheckTicker.C:
 			if !h.Enabled() {
 				h.logDisabled(reqLog, reason)
 				return false
 			}
-			if err := h.writeKeepalive(c, reqLog, reason, streamStarted); err != nil {
-				return false
-			}
 		}
 	}
-}
-
-func (h *openAIStreamHoldController) writeKeepalive(
-	c *gin.Context,
-	reqLog *zap.Logger,
-	reason openAIStreamHoldReason,
-	streamStarted *bool,
-) error {
-	if err := writeOpenAIStreamHoldKeepalive(c, streamStarted); err != nil {
-		if reqLog != nil {
-			reqLog.Info("openai.stream_hold_client_write_failed",
-				zap.String("reason", string(reason)),
-				zap.Int("hold_cycle", h.waitCount),
-				zap.Duration("held_for", time.Since(h.startedAt)),
-				zap.Error(err),
-			)
-		}
-		return err
-	}
-	h.keepaliveCount++
-	if reqLog != nil {
-		reqLog.Debug("openai.stream_hold_keepalive",
-			zap.String("reason", string(reason)),
-			zap.Int("hold_cycle", h.waitCount),
-			zap.Int("keepalive_count", h.keepaliveCount),
-			zap.Duration("held_for", time.Since(h.startedAt)),
-		)
-	}
-	return nil
 }
 
 func (h *openAIStreamHoldController) jitteredRetryInterval(base time.Duration) time.Duration {
@@ -215,8 +180,8 @@ func (h *openAIStreamHoldController) Recovered(reqLog *zap.Logger, accountID int
 	reqLog.Info("openai.stream_hold_recovered",
 		zap.Int64("account_id", accountID),
 		zap.Int("hold_cycles", h.waitCount),
-		zap.Int("keepalive_count", h.keepaliveCount),
 		zap.Duration("held_for", time.Since(h.startedAt)),
+		zap.Bool("downstream_response_deferred", true),
 	)
 }
 
@@ -227,7 +192,6 @@ func (h *openAIStreamHoldController) logDisabled(reqLog *zap.Logger, reason open
 	reqLog.Info("openai.stream_hold_disabled",
 		zap.String("reason", string(reason)),
 		zap.Int("hold_cycles", h.waitCount),
-		zap.Int("keepalive_count", h.keepaliveCount),
 		zap.Duration("held_for", time.Since(h.startedAt)),
 	)
 }
@@ -254,29 +218,9 @@ func (h *openAIStreamHoldController) logDeadline(reqLog *zap.Logger, reason open
 	reqLog.Warn("openai.stream_hold_deadline_reached",
 		zap.String("reason", string(reason)),
 		zap.Int("hold_cycles", h.waitCount),
-		zap.Int("keepalive_count", h.keepaliveCount),
 		zap.Duration("held_for", time.Since(h.startedAt)),
 		zap.Duration("max_duration", h.maxDuration),
 	)
-}
-
-func writeOpenAIStreamHoldKeepalive(c *gin.Context, streamStarted *bool) error {
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return errors.New("streaming response writer does not support flushing")
-	}
-	if streamStarted != nil && !*streamStarted {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
-		c.Header("X-Accel-Buffering", "no")
-		*streamStarted = true
-	}
-	if _, err := fmt.Fprint(c.Writer, string(SSEPingFormatComment)); err != nil {
-		return err
-	}
-	flusher.Flush()
-	return nil
 }
 
 func openAIStreamHoldFailoverReason(err *service.UpstreamFailoverError) (openAIStreamHoldReason, bool) {
