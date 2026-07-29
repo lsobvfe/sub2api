@@ -874,6 +874,25 @@ type ImageConcurrencyConfig struct {
 	MaxWaitingRequests int `mapstructure:"max_waiting_requests"`
 }
 
+// GatewayOpenAIStreamHoldConfig controls request-level recovery for streaming
+// OpenAI Responses requests before the first semantic output reaches the client.
+type GatewayOpenAIStreamHoldConfig struct {
+	// Enabled keeps retryable requests open instead of returning a terminal error.
+	Enabled bool `mapstructure:"enabled"`
+	// KeepaliveInterval is the downstream SSE comment interval while waiting.
+	KeepaliveInterval time.Duration `mapstructure:"keepalive_interval"`
+	// ResponseHeaderTimeout bounds one upstream attempt before response headers arrive.
+	ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
+	// MinRetryInterval is the initial delay between exhausted scheduling cycles.
+	MinRetryInterval time.Duration `mapstructure:"min_retry_interval"`
+	// MaxRetryInterval caps exponential retry backoff.
+	MaxRetryInterval time.Duration `mapstructure:"max_retry_interval"`
+	// RetryJitterRatio spreads retries to avoid synchronized recovery bursts.
+	RetryJitterRatio float64 `mapstructure:"retry_jitter_ratio"`
+	// MaxDuration limits total hold time. Zero means wait until success or client cancellation.
+	MaxDuration time.Duration `mapstructure:"max_duration"`
+}
+
 const (
 	ImageConcurrencyOverflowModeReject = "reject"
 	ImageConcurrencyOverflowModeWait   = "wait"
@@ -934,6 +953,8 @@ type GatewayConfig struct {
 	OpenAIProxyStreamCircuit GatewayOpenAIProxyStreamCircuitConfig `mapstructure:"openai_proxy_stream_circuit"`
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
 	ImageConcurrency ImageConcurrencyConfig `mapstructure:"image_concurrency"`
+	// OpenAIStreamHold: streaming Responses 首个语义输出前的持续等待策略。
+	OpenAIStreamHold GatewayOpenAIStreamHoldConfig `mapstructure:"openai_stream_hold"`
 
 	// HTTP 上游连接池配置（性能优化：支持高并发场景调优）
 	// MaxIdleConns: 所有主机的最大空闲连接总数
@@ -2290,6 +2311,13 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_concurrency.overflow_mode", ImageConcurrencyOverflowModeReject)
 	viper.SetDefault("gateway.image_concurrency.wait_timeout_seconds", 30)
 	viper.SetDefault("gateway.image_concurrency.max_waiting_requests", 100)
+	viper.SetDefault("gateway.openai_stream_hold.enabled", false)
+	viper.SetDefault("gateway.openai_stream_hold.keepalive_interval", 10*time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.response_header_timeout", 10*time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.min_retry_interval", time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.max_retry_interval", 30*time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.retry_jitter_ratio", 0.2)
+	viper.SetDefault("gateway.openai_stream_hold.max_duration", time.Duration(0))
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
@@ -3132,6 +3160,38 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.ImageConcurrency.MaxWaitingRequests < 0 {
 		return fmt.Errorf("gateway.image_concurrency.max_waiting_requests must be non-negative")
+	}
+	streamHold := c.Gateway.OpenAIStreamHold
+	if streamHold.Enabled ||
+		streamHold.KeepaliveInterval != 0 ||
+		streamHold.ResponseHeaderTimeout != 0 ||
+		streamHold.MinRetryInterval != 0 ||
+		streamHold.MaxRetryInterval != 0 ||
+		streamHold.RetryJitterRatio != 0 ||
+		streamHold.MaxDuration != 0 {
+		if streamHold.KeepaliveInterval < 5*time.Second ||
+			streamHold.KeepaliveInterval > 30*time.Second {
+			return fmt.Errorf("gateway.openai_stream_hold.keepalive_interval must be between 5s and 30s")
+		}
+		if streamHold.ResponseHeaderTimeout < time.Second ||
+			streamHold.ResponseHeaderTimeout > streamHold.KeepaliveInterval {
+			return fmt.Errorf("gateway.openai_stream_hold.response_header_timeout must be between 1s and keepalive_interval")
+		}
+		if streamHold.MinRetryInterval <= 0 {
+			return fmt.Errorf("gateway.openai_stream_hold.min_retry_interval must be positive")
+		}
+		if streamHold.MaxRetryInterval < streamHold.MinRetryInterval {
+			return fmt.Errorf("gateway.openai_stream_hold.max_retry_interval must be greater than or equal to min_retry_interval")
+		}
+		if streamHold.MaxRetryInterval > 10*time.Minute {
+			return fmt.Errorf("gateway.openai_stream_hold.max_retry_interval must not exceed 10m")
+		}
+		if streamHold.RetryJitterRatio < 0 || streamHold.RetryJitterRatio > 1 {
+			return fmt.Errorf("gateway.openai_stream_hold.retry_jitter_ratio must be within [0,1]")
+		}
+		if streamHold.MaxDuration < 0 {
+			return fmt.Errorf("gateway.openai_stream_hold.max_duration must be non-negative")
+		}
 	}
 	if c.Gateway.MaxIdleConns <= 0 {
 		return fmt.Errorf("gateway.max_idle_conns must be positive")

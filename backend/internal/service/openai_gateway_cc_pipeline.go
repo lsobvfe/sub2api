@@ -180,6 +180,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 		return nil, fmt.Errorf("build upstream request: %w", err)
 	}
 	upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamProfile(upstreamReq.Context(), HTTPUpstreamProfileOpenAI))
+	upstreamReq = upstreamReq.WithContext(s.withOpenAIResponsesStreamHoldTransport(upstreamReq.Context(), c, stream))
 	upstreamReq.Header.Set("Content-Type", "application/json")
 	upstreamReq.Header.Set("Authorization", "Bearer "+bearerToken)
 	if stream {

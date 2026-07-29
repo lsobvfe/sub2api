@@ -148,6 +148,7 @@ func TestOpenAIBuildUpstreamRequestOpenAIPassthroughForwardsResponsesLiteHeader(
 		newOpenAIImageGenerationControlTestAccount(),
 		[]byte(`{"model":"gpt-5.4","input":"write code"}`),
 		"test-token",
+		false,
 	)
 
 	require.NoError(t, err)

@@ -1907,6 +1907,39 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be non-negative",
 		},
 		{
+			name:    "gateway openai stream hold keepalive too small",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.KeepaliveInterval = 4 * time.Second },
+			wantErr: "gateway.openai_stream_hold.keepalive_interval",
+		},
+		{
+			name:    "gateway openai stream hold response header timeout too large",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.ResponseHeaderTimeout = 11 * time.Second },
+			wantErr: "gateway.openai_stream_hold.response_header_timeout",
+		},
+		{
+			name:    "gateway openai stream hold retry interval non-positive",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MinRetryInterval = 0 },
+			wantErr: "gateway.openai_stream_hold.min_retry_interval",
+		},
+		{
+			name: "gateway openai stream hold retry interval inverted",
+			mutate: func(c *Config) {
+				c.Gateway.OpenAIStreamHold.MinRetryInterval = 31 * time.Second
+				c.Gateway.OpenAIStreamHold.MaxRetryInterval = 30 * time.Second
+			},
+			wantErr: "gateway.openai_stream_hold.max_retry_interval",
+		},
+		{
+			name:    "gateway openai stream hold retry jitter invalid",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.RetryJitterRatio = 1.1 },
+			wantErr: "gateway.openai_stream_hold.retry_jitter_ratio",
+		},
+		{
+			name:    "gateway openai stream hold duration negative",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MaxDuration = -time.Second },
+			wantErr: "gateway.openai_stream_hold.max_duration",
+		},
+		{
 			name:    "gateway image concurrency max waiting negative",
 			mutate:  func(c *Config) { c.Gateway.ImageConcurrency.MaxWaitingRequests = -1 },
 			wantErr: "gateway.image_concurrency.max_waiting_requests must be non-negative",
@@ -2521,6 +2554,27 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.ImageNonstreamKeepaliveInterval != 0 {
 		t.Fatalf("image_nonstream_keepalive_interval = %d, want 0", cfg.Gateway.ImageNonstreamKeepaliveInterval)
+	}
+	if cfg.Gateway.OpenAIStreamHold.Enabled {
+		t.Fatal("openai_stream_hold.enabled = true, want false")
+	}
+	if cfg.Gateway.OpenAIStreamHold.KeepaliveInterval != 10*time.Second {
+		t.Fatalf("openai_stream_hold.keepalive_interval = %s, want 10s", cfg.Gateway.OpenAIStreamHold.KeepaliveInterval)
+	}
+	if cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout != 10*time.Second {
+		t.Fatalf("openai_stream_hold.response_header_timeout = %s, want 10s", cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout)
+	}
+	if cfg.Gateway.OpenAIStreamHold.MinRetryInterval != time.Second {
+		t.Fatalf("openai_stream_hold.min_retry_interval = %s, want 1s", cfg.Gateway.OpenAIStreamHold.MinRetryInterval)
+	}
+	if cfg.Gateway.OpenAIStreamHold.MaxRetryInterval != 30*time.Second {
+		t.Fatalf("openai_stream_hold.max_retry_interval = %s, want 30s", cfg.Gateway.OpenAIStreamHold.MaxRetryInterval)
+	}
+	if cfg.Gateway.OpenAIStreamHold.RetryJitterRatio != 0.2 {
+		t.Fatalf("openai_stream_hold.retry_jitter_ratio = %v, want 0.2", cfg.Gateway.OpenAIStreamHold.RetryJitterRatio)
+	}
+	if cfg.Gateway.OpenAIStreamHold.MaxDuration != 0 {
+		t.Fatalf("openai_stream_hold.max_duration = %s, want 0s", cfg.Gateway.OpenAIStreamHold.MaxDuration)
 	}
 	if cfg.Gateway.ImageConcurrency.Enabled {
 		t.Fatalf("image_concurrency.enabled = true, want false")

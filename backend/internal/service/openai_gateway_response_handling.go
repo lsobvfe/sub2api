@@ -47,7 +47,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	if account != nil && account.Platform == PlatformOpenAI {
 		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
 	}
-	guardFirstOutput := firstOutputTimeout > 0
+	streamHoldEnabled := s.openAIResponsesStreamHoldEnabled(c)
+	guardFirstOutput := firstOutputTimeout > 0 || streamHoldEnabled
 	var attemptResponseHeaders http.Header
 	if guardFirstOutput {
 		if s.responseHeaderFilter != nil {
@@ -147,7 +148,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	documentScanner := newOpenAISSEJSONDocumentScanner(scanner)
 
 	streamInterval := time.Duration(0)
-	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+	if s.cfg != nil && !streamHoldEnabled && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	// 仅监控上游数据间隔超时，不被下游写入阻塞影响
@@ -740,6 +741,29 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 	}
 
+}
+
+func (s *OpenAIGatewayService) openAIResponsesStreamHoldEnabled(c *gin.Context) bool {
+	if s == nil || s.cfg == nil || !s.cfg.Gateway.OpenAIStreamHold.Enabled ||
+		c == nil || c.Request == nil || c.Request.URL == nil {
+		return false
+	}
+	path := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
+	return strings.HasSuffix(path, "/responses") || strings.Contains(path, "/responses/")
+}
+
+func (s *OpenAIGatewayService) withOpenAIResponsesStreamHoldTransport(
+	ctx context.Context,
+	c *gin.Context,
+	stream bool,
+) context.Context {
+	if !stream || !s.openAIResponsesStreamHoldEnabled(c) {
+		return ctx
+	}
+	return WithHTTPUpstreamResponseHeaderTimeout(
+		ctx,
+		s.cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout,
+	)
 }
 
 // extractOpenAISSEDataLine 低开销提取 SSE `data:` 行内容。

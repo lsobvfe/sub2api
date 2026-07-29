@@ -127,7 +127,7 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 	c.Request.Header.Set("Authorization", "Bearer inbound-must-not-forward")
 
 	svc := &OpenAIGatewayService{}
-	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "")
+	req, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), c, account, body, "", false)
 	require.NoError(t, err)
 	require.Equal(t, "AgentAssertion", strings.SplitN(req.Header.Get("Authorization"), " ", 2)[0])
 	require.Equal(t, "account-agent-passthrough", req.Header.Get("chatgpt-account-id"))
@@ -155,7 +155,7 @@ func TestOpenAIAgentIdentityPassthroughKeepsSessionAndPromptCacheHeaders(t *test
 	oauthContext.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	oauthContext.Request.Header.Set("session_id", "client-session")
 	oauthContext.Request.Header.Set("conversation_id", "client-conversation")
-	oauthReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), oauthContext, oauthAccount, body, "oauth-token")
+	oauthReq, err := svc.buildUpstreamRequestOpenAIPassthrough(context.Background(), oauthContext, oauthAccount, body, "oauth-token", false)
 	require.NoError(t, err)
 	require.Equal(t, oauthReq.Header.Get("session_id"), req.Header.Get("session_id"))
 	require.Equal(t, oauthReq.Header.Get("conversation_id"), req.Header.Get("conversation_id"))

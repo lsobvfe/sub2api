@@ -284,14 +284,69 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 }
 
 func httpClientForUpstreamRequest(client *http.Client, req *http.Request) *http.Client {
-	if client == nil || req == nil || !service.HTTPUpstreamRedirectsDisabled(req.Context()) {
+	if client == nil || req == nil {
+		return client
+	}
+	disableRedirects := service.HTTPUpstreamRedirectsDisabled(req.Context())
+	responseHeaderTimeout := service.HTTPUpstreamResponseHeaderTimeoutFromContext(req.Context())
+	if !disableRedirects && responseHeaderTimeout <= 0 {
 		return client
 	}
 	clone := *client
-	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
+	if disableRedirects {
+		clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+	if responseHeaderTimeout > 0 {
+		base := clone.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		clone.Transport = &responseHeaderTimeoutRoundTripper{
+			base:    base,
+			timeout: responseHeaderTimeout,
+		}
 	}
 	return &clone
+}
+
+type responseHeaderTimeoutRoundTripper struct {
+	base    http.RoundTripper
+	timeout time.Duration
+}
+
+func (t *responseHeaderTimeoutRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t == nil || t.base == nil {
+		return nil, errors.New("response header timeout transport is unavailable")
+	}
+	if t.timeout <= 0 || req == nil {
+		return t.base.RoundTrip(req)
+	}
+
+	guardedCtx, cancel := context.WithCancel(req.Context())
+	guardedReq := req.Clone(guardedCtx)
+	fired := make(chan struct{})
+	timer := time.AfterFunc(t.timeout, func() {
+		close(fired)
+		cancel()
+	})
+
+	resp, err := t.base.RoundTrip(guardedReq)
+	if timer.Stop() {
+		if err != nil || resp == nil || resp.Body == nil {
+			cancel()
+		} else {
+			resp.Body = wrapTrackedBody(resp.Body, cancel)
+		}
+		return resp, err
+	}
+
+	<-fired
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	return nil, fmt.Errorf("upstream response header timeout after %s: %w", t.timeout, context.DeadlineExceeded)
 }
 
 // grokAccessDeniedFallbackTransport preserves the subscription CLI proxy as
