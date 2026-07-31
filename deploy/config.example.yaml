@@ -481,6 +481,10 @@ gateway:
     max_retry_interval: 30s
     retry_jitter_ratio: 0.2
     max_duration: 0s
+    # Active hold observability uses Redis leases; lease TTL must be at least 3x heartbeat.
+    tracking_heartbeat_interval: 10s
+    tracking_lease_ttl: 45s
+    tracking_operation_timeout: 2s
   # Image generation independent concurrency limiter (process-local, default disabled)
   # 图片生成独立并发限制（进程级，默认关闭；多实例总上限约为实例数×该值）
   image_concurrency:

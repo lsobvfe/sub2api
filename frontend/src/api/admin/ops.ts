@@ -412,6 +412,69 @@ export async function getAccountAvailabilityStats(platform?: string, groupId?: n
   return data
 }
 
+export type OpenAIStreamHoldPhase = 'holding' | 'retrying'
+
+export interface OpenAIStreamHoldState {
+  request_id: string
+  client_request_id?: string
+  user_id: number
+  api_key_id: number
+  group_id?: number | null
+  account_id?: number | null
+  platform: string
+  model: string
+  request_path: string
+  phase: OpenAIStreamHoldPhase
+  reason: string
+  hold_cycle: number
+  request_started_at: string
+  held_since: string
+  updated_at: string
+  retry_delay_ms: number
+  next_retry_at?: string | null
+  last_upstream_status_code?: number | null
+  last_error?: string
+}
+
+export interface OpenAIStreamHoldSummary {
+  active_count: number
+  holding_count: number
+  retrying_count: number
+  oldest_held_ms: number
+  average_held_ms: number
+  by_reason: Record<string, number>
+}
+
+export interface OpenAIStreamHoldSnapshot {
+  enabled: boolean
+  holds: OpenAIStreamHoldState[]
+  summary: OpenAIStreamHoldSummary
+  timestamp: string
+}
+
+export async function getActiveStreamHolds(
+  platform?: string,
+  groupId?: number | null,
+  accountId?: number | null,
+  options: OpsRequestOptions = {}
+): Promise<OpenAIStreamHoldSnapshot> {
+  const params: Record<string, string | number> = {}
+  if (platform) {
+    params.platform = platform
+  }
+  if (typeof groupId === 'number' && groupId > 0) {
+    params.group_id = groupId
+  }
+  if (typeof accountId === 'number' && accountId > 0) {
+    params.account_id = accountId
+  }
+  const { data } = await apiClient.get<OpenAIStreamHoldSnapshot>('/admin/ops/stream-holds', {
+    params,
+    signal: options.signal
+  })
+  return data
+}
+
 export interface OpsRateSummary {
   current: number
   peak: number
@@ -1316,6 +1379,7 @@ export const opsAPI = {
   getConcurrencyStats,
   getUserConcurrencyStats,
   getAccountAvailabilityStats,
+  getActiveStreamHolds,
   getRealtimeTrafficSummary,
   subscribeQPS,
 

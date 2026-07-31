@@ -279,6 +279,35 @@ func TestOpsErrorLoggerMiddleware_HardSkipsIngressRejection(t *testing.T) {
 	require.Zero(t, OpsErrorLogEnqueuedTotal(), "ingress rejection must not enter the error queue")
 }
 
+func TestOpsErrorLoggerMiddleware_RecordsRecoveredUpstreamWithoutRequestFailure(t *testing.T) {
+	setupOpsErrorLogTestQueue(t, 4)
+	gin.SetMode(gin.TestMode)
+
+	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router := gin.New()
+	router.Use(OpsErrorLoggerMiddleware(ops))
+	router.GET("/v1/responses", func(c *gin.Context) {
+		setOpsRequestContext(c, "gpt-5.1", true)
+		service.SetOpsUpstreamError(c, http.StatusBadGateway, "temporary upstream failure", "")
+		c.Status(http.StatusOK)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	router.ServeHTTP(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, int64(1), OpsErrorLogEnqueuedTotal())
+	job := <-opsErrorLogQueue
+	require.NotNil(t, job.entry)
+	require.Equal(t, http.StatusOK, job.entry.StatusCode)
+	require.NotNil(t, job.entry.UpstreamStatusCode)
+	require.Equal(t, http.StatusBadGateway, *job.entry.UpstreamStatusCode)
+	require.Equal(t, "upstream", job.entry.ErrorPhase)
+	require.Equal(t, "upstream_error", job.entry.ErrorType)
+	require.Contains(t, job.entry.ErrorMessage, "Recovered upstream error 502")
+}
+
 func TestNormalizeOpsPersistentUserAgentBoundsAndPreservesUTF8(t *testing.T) {
 	value := strings.Repeat("a", opsErrorLogMaxUserAgentBytes-1) + "你" + strings.Repeat("b", 32)
 	got := normalizeOpsPersistentUserAgent("  " + value + "  ")

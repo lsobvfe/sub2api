@@ -754,6 +754,37 @@ export default {
         errorAccounts: '异常 {count}',
         loadFailed: '加载并发数据失败'
       },
+      streamHolds: {
+        title: '活动流式等待',
+        enabled: '持续等待已启用',
+        disabled: '持续等待已关闭',
+        active: '活动请求',
+        oldest: '最久等待',
+        holding: '等待中',
+        retrying: '上游尝试中',
+        elapsed: '已等待',
+        state: '状态 / 原因',
+        request: '请求 / 模型',
+        routing: '平台 / 账号',
+        retry: '重试',
+        updated: '最近更新',
+        cycle: '第 {count} 轮',
+        upstreamAttempt: '等待上游响应',
+        empty: '当前没有被 hold 的流式请求',
+        loadFailed: '加载活动流式等待失败',
+        phases: {
+          holding: '等待',
+          retrying: '重试中'
+        },
+        reasons: {
+          no_available_account: '暂无可用账号',
+          user_concurrency: '用户并发已满',
+          account_concurrency: '账号并发已满',
+          upstream_retryable: '上游临时错误',
+          upstream_rate_limit: '上游限流',
+          upstream_unavailable: '上游暂不可用'
+        }
+      },
       realtime: {
         title: '实时信息',
         connected: '实时已连接',

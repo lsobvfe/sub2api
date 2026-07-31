@@ -887,6 +887,12 @@ type GatewayOpenAIStreamHoldConfig struct {
 	RetryJitterRatio float64 `mapstructure:"retry_jitter_ratio"`
 	// MaxDuration limits total hold time. Zero means wait until success or client cancellation.
 	MaxDuration time.Duration `mapstructure:"max_duration"`
+	// TrackingHeartbeatInterval refreshes the active-hold lease while an upstream attempt is running.
+	TrackingHeartbeatInterval time.Duration `mapstructure:"tracking_heartbeat_interval"`
+	// TrackingLeaseTTL removes abandoned active-hold records after a process or request dies.
+	TrackingLeaseTTL time.Duration `mapstructure:"tracking_lease_ttl"`
+	// TrackingOperationTimeout bounds each Redis tracking operation.
+	TrackingOperationTimeout time.Duration `mapstructure:"tracking_operation_timeout"`
 }
 
 const (
@@ -2315,6 +2321,9 @@ func setDefaults() {
 	viper.SetDefault("gateway.openai_stream_hold.max_retry_interval", 30*time.Second)
 	viper.SetDefault("gateway.openai_stream_hold.retry_jitter_ratio", 0.2)
 	viper.SetDefault("gateway.openai_stream_hold.max_duration", time.Duration(0))
+	viper.SetDefault("gateway.openai_stream_hold.tracking_heartbeat_interval", 10*time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.tracking_lease_ttl", 45*time.Second)
+	viper.SetDefault("gateway.openai_stream_hold.tracking_operation_timeout", 2*time.Second)
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
@@ -3163,7 +3172,10 @@ func (c *Config) Validate() error {
 		streamHold.MinRetryInterval != 0 ||
 		streamHold.MaxRetryInterval != 0 ||
 		streamHold.RetryJitterRatio != 0 ||
-		streamHold.MaxDuration != 0 {
+		streamHold.MaxDuration != 0 ||
+		streamHold.TrackingHeartbeatInterval != 0 ||
+		streamHold.TrackingLeaseTTL != 0 ||
+		streamHold.TrackingOperationTimeout != 0 {
 		if streamHold.MinRetryInterval <= 0 {
 			return fmt.Errorf("gateway.openai_stream_hold.min_retry_interval must be positive")
 		}
@@ -3178,6 +3190,18 @@ func (c *Config) Validate() error {
 		}
 		if streamHold.MaxDuration < 0 {
 			return fmt.Errorf("gateway.openai_stream_hold.max_duration must be non-negative")
+		}
+		if streamHold.TrackingHeartbeatInterval <= 0 {
+			return fmt.Errorf("gateway.openai_stream_hold.tracking_heartbeat_interval must be positive")
+		}
+		if streamHold.TrackingLeaseTTL < 3*streamHold.TrackingHeartbeatInterval {
+			return fmt.Errorf("gateway.openai_stream_hold.tracking_lease_ttl must be at least three times tracking_heartbeat_interval")
+		}
+		if streamHold.TrackingOperationTimeout <= 0 {
+			return fmt.Errorf("gateway.openai_stream_hold.tracking_operation_timeout must be positive")
+		}
+		if streamHold.TrackingOperationTimeout >= streamHold.TrackingHeartbeatInterval {
+			return fmt.Errorf("gateway.openai_stream_hold.tracking_operation_timeout must be less than tracking_heartbeat_interval")
 		}
 	}
 	if c.Gateway.MaxIdleConns <= 0 {

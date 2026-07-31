@@ -133,6 +133,7 @@ func newOpenAIResponsesFailoverTestHandlerWithConfig(
 		nil,
 		nil,
 		nil,
+		nil,
 		cfg,
 	)
 	handler.maxAccountSwitches = 10

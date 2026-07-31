@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -26,24 +28,39 @@ const (
 	openAIStreamHoldUpstreamUnavailable openAIStreamHoldReason = "upstream_unavailable"
 )
 
+type openAIStreamHoldObservation struct {
+	AccountID          int64
+	UpstreamStatusCode int
+	LastError          string
+}
+
 type openAIStreamHoldController struct {
 	configured        bool
 	runtimeEnabled    func() bool
+	tracker           service.OpenAIStreamHoldTracker
 	minRetryInterval  time.Duration
 	maxRetryInterval  time.Duration
 	retryJitterRatio  float64
 	maxDuration       time.Duration
-	startedAt         time.Time
 	nextRetryInterval time.Duration
 	waitCount         int
+
+	mu                  sync.Mutex
+	trackingOpMu        sync.Mutex
+	state               service.OpenAIStreamHoldState
+	finished            bool
+	heartbeatCancel     context.CancelFunc
+	trackingWriteFailed bool
 }
 
 func newOpenAIStreamHoldController(
 	cfg *config.Config,
 	stream bool,
 	runtimeEnabled func() bool,
+	tracker service.OpenAIStreamHoldTracker,
+	state service.OpenAIStreamHoldState,
 ) *openAIStreamHoldController {
-	controller := &openAIStreamHoldController{}
+	controller := &openAIStreamHoldController{tracker: tracker, state: state}
 	if cfg == nil || !stream || runtimeEnabled == nil {
 		return controller
 	}
@@ -54,9 +71,42 @@ func newOpenAIStreamHoldController(
 	controller.maxRetryInterval = hold.MaxRetryInterval
 	controller.retryJitterRatio = hold.RetryJitterRatio
 	controller.maxDuration = hold.MaxDuration
-	controller.startedAt = time.Now()
 	controller.nextRetryInterval = hold.MinRetryInterval
+	if controller.state.RequestStartedAt.IsZero() {
+		controller.state.RequestStartedAt = time.Now().UTC()
+	}
 	return controller
+}
+
+func newOpenAIStreamHoldState(
+	c *gin.Context,
+	requestStartedAt time.Time,
+	userID int64,
+	apiKey *service.APIKey,
+	platform string,
+	model string,
+) service.OpenAIStreamHoldState {
+	state := service.OpenAIStreamHoldState{
+		UserID:           userID,
+		Platform:         platform,
+		Model:            model,
+		RequestStartedAt: requestStartedAt.UTC(),
+	}
+	if apiKey != nil {
+		state.APIKeyID = apiKey.ID
+		if apiKey.GroupID != nil {
+			groupID := *apiKey.GroupID
+			state.GroupID = &groupID
+		}
+	}
+	if c == nil || c.Request == nil {
+		return state
+	}
+	state.RequestPath = c.Request.URL.Path
+	state.RequestID, _ = c.Request.Context().Value(ctxkey.RequestID).(string)
+	state.ClientRequestID, _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
+	state.LeaseID = state.ClientRequestID
+	return state
 }
 
 func (h *openAIStreamHoldController) Enabled() bool {
@@ -68,9 +118,11 @@ func (h *openAIStreamHoldController) Wait(
 	reqLog *zap.Logger,
 	reason openAIStreamHoldReason,
 	retryAfter time.Duration,
+	observation openAIStreamHoldObservation,
 ) bool {
 	if !h.Enabled() {
 		h.logDisabled(reqLog, reason)
+		h.finish(reqLog, "disabled")
 		return false
 	}
 	if c == nil || c.Request == nil {
@@ -93,9 +145,14 @@ func (h *openAIStreamHoldController) Wait(
 
 	deadlineLimited := false
 	if h.maxDuration > 0 {
-		remaining := time.Until(h.startedAt.Add(h.maxDuration))
+		heldSince := h.heldSince()
+		if heldSince.IsZero() {
+			heldSince = time.Now()
+		}
+		remaining := time.Until(heldSince.Add(h.maxDuration))
 		if remaining <= 0 {
 			h.logDeadline(reqLog, reason)
+			h.finish(reqLog, "deadline")
 			return false
 		}
 		if delay >= remaining {
@@ -105,15 +162,34 @@ func (h *openAIStreamHoldController) Wait(
 	}
 
 	h.waitCount++
+	firstHold := h.updateTrackingState(
+		service.OpenAIStreamHoldPhaseHolding,
+		reason,
+		delay,
+		observation,
+	)
 	if reqLog != nil {
 		reqLog.Warn("openai.stream_hold_waiting",
 			zap.String("reason", string(reason)),
 			zap.Int("hold_cycle", h.waitCount),
 			zap.Duration("retry_delay", delay),
-			zap.Duration("held_for", time.Since(h.startedAt)),
+			zap.Duration("held_for", h.heldFor()),
 			zap.Duration("max_duration", h.maxDuration),
 			zap.Bool("downstream_response_deferred", true),
 		)
+	}
+	if firstHold {
+		if reqLog != nil {
+			reqLog.Info("openai.stream_hold_tracking_started",
+				zap.String("reason", string(reason)),
+				zap.String("phase", service.OpenAIStreamHoldPhaseHolding),
+				zap.Bool("redis_lease", h.tracker != nil),
+			)
+		}
+	}
+	h.persist(reqLog, "state_update")
+	if firstHold {
+		h.startHeartbeat(reqLog)
 	}
 
 	timer := time.NewTimer(delay)
@@ -132,26 +208,36 @@ func (h *openAIStreamHoldController) Wait(
 				reqLog.Info("openai.stream_hold_canceled",
 					zap.String("reason", string(reason)),
 					zap.Int("hold_cycle", h.waitCount),
-					zap.Duration("held_for", time.Since(h.startedAt)),
+					zap.Duration("held_for", h.heldFor()),
 					zap.Error(ctx.Err()),
 				)
 			}
+			h.finish(reqLog, "client_canceled")
 			return false
 		case <-timer.C:
 			if !h.Enabled() {
 				h.logDisabled(reqLog, reason)
+				h.finish(reqLog, "disabled")
 				return false
 			}
 			if deadlineLimited {
 				h.logDeadline(reqLog, reason)
+				h.finish(reqLog, "deadline")
 				return false
 			}
 			h.advanceBackoff()
+			h.updateTrackingState(
+				service.OpenAIStreamHoldPhaseRetrying,
+				reason,
+				0,
+				observation,
+			)
+			h.persist(reqLog, "retrying")
 			if reqLog != nil {
 				reqLog.Info("openai.stream_hold_retrying",
 					zap.String("reason", string(reason)),
 					zap.Int("hold_cycle", h.waitCount),
-					zap.Duration("held_for", time.Since(h.startedAt)),
+					zap.Duration("held_for", h.heldFor()),
 					zap.Duration("next_retry_interval", h.nextRetryInterval),
 				)
 			}
@@ -159,6 +245,7 @@ func (h *openAIStreamHoldController) Wait(
 		case <-stateCheckTicker.C:
 			if !h.Enabled() {
 				h.logDisabled(reqLog, reason)
+				h.finish(reqLog, "disabled")
 				return false
 			}
 		}
@@ -174,15 +261,61 @@ func (h *openAIStreamHoldController) jitteredRetryInterval(base time.Duration) t
 }
 
 func (h *openAIStreamHoldController) Recovered(reqLog *zap.Logger, accountID int64) {
-	if h == nil || !h.configured || h.waitCount == 0 || reqLog == nil {
+	if h == nil || !h.configured || h.waitCount == 0 {
 		return
 	}
-	reqLog.Info("openai.stream_hold_recovered",
-		zap.Int64("account_id", accountID),
-		zap.Int("hold_cycles", h.waitCount),
-		zap.Duration("held_for", time.Since(h.startedAt)),
-		zap.Bool("downstream_response_deferred", true),
-	)
+	h.setAccountID(accountID)
+	if reqLog != nil {
+		reqLog.Info("openai.stream_hold_recovered",
+			zap.Int64("account_id", accountID),
+			zap.Int("hold_cycles", h.waitCount),
+			zap.Duration("held_for", h.heldFor()),
+			zap.Bool("downstream_response_deferred", true),
+		)
+	}
+	h.finish(reqLog, "recovered")
+}
+
+func (h *openAIStreamHoldController) Retrying(reqLog *zap.Logger, accountID int64) {
+	if h == nil || accountID <= 0 || h.waitCount == 0 {
+		return
+	}
+	h.mu.Lock()
+	if h.finished {
+		h.mu.Unlock()
+		return
+	}
+	value := accountID
+	h.state.AccountID = &value
+	h.state.Phase = service.OpenAIStreamHoldPhaseRetrying
+	h.state.UpdatedAt = time.Now().UTC()
+	h.state.RetryDelayMs = 0
+	h.state.NextRetryAt = nil
+	h.mu.Unlock()
+
+	h.persist(reqLog, "upstream_attempt")
+	if reqLog != nil {
+		reqLog.Info("openai.stream_hold_upstream_attempt",
+			zap.Int64("account_id", accountID),
+			zap.Int("hold_cycle", h.waitCount),
+			zap.Duration("held_for", h.heldFor()),
+		)
+	}
+}
+
+func (h *openAIStreamHoldController) Close(reqLog *zap.Logger, requestContext context.Context) {
+	if h == nil || h.waitCount == 0 {
+		return
+	}
+	if requestContext != nil && requestContext.Err() != nil {
+		h.finish(reqLog, "client_canceled")
+		return
+	}
+	if !h.Enabled() {
+		h.finish(reqLog, "disabled")
+		return
+	}
+	h.finish(reqLog, "terminal")
 }
 
 func (h *openAIStreamHoldController) logDisabled(reqLog *zap.Logger, reason openAIStreamHoldReason) {
@@ -192,7 +325,7 @@ func (h *openAIStreamHoldController) logDisabled(reqLog *zap.Logger, reason open
 	reqLog.Info("openai.stream_hold_disabled",
 		zap.String("reason", string(reason)),
 		zap.Int("hold_cycles", h.waitCount),
-		zap.Duration("held_for", time.Since(h.startedAt)),
+		zap.Duration("held_for", h.heldFor()),
 	)
 }
 
@@ -218,9 +351,189 @@ func (h *openAIStreamHoldController) logDeadline(reqLog *zap.Logger, reason open
 	reqLog.Warn("openai.stream_hold_deadline_reached",
 		zap.String("reason", string(reason)),
 		zap.Int("hold_cycles", h.waitCount),
-		zap.Duration("held_for", time.Since(h.startedAt)),
+		zap.Duration("held_for", h.heldFor()),
 		zap.Duration("max_duration", h.maxDuration),
 	)
+}
+
+func (h *openAIStreamHoldController) updateTrackingState(
+	phase string,
+	reason openAIStreamHoldReason,
+	retryDelay time.Duration,
+	observation openAIStreamHoldObservation,
+) bool {
+	if h == nil {
+		return false
+	}
+	now := time.Now().UTC()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.finished {
+		return false
+	}
+	firstHold := h.state.HeldSince.IsZero()
+	if firstHold {
+		h.state.HeldSince = now
+	}
+	h.state.Phase = phase
+	h.state.Reason = string(reason)
+	h.state.HoldCycle = h.waitCount
+	h.state.UpdatedAt = now
+	h.state.RetryDelayMs = max(retryDelay.Milliseconds(), 0)
+	if retryDelay > 0 {
+		nextRetryAt := now.Add(retryDelay)
+		h.state.NextRetryAt = &nextRetryAt
+	} else {
+		h.state.NextRetryAt = nil
+	}
+	if observation.AccountID > 0 {
+		accountID := observation.AccountID
+		h.state.AccountID = &accountID
+	}
+	if observation.UpstreamStatusCode > 0 {
+		statusCode := observation.UpstreamStatusCode
+		h.state.LastUpstreamStatusCode = &statusCode
+	}
+	if strings.TrimSpace(observation.LastError) != "" {
+		h.state.LastError = observation.LastError
+	}
+	return firstHold
+}
+
+func (h *openAIStreamHoldController) setAccountID(accountID int64) {
+	if h == nil || accountID <= 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	value := accountID
+	h.state.AccountID = &value
+	h.state.UpdatedAt = time.Now().UTC()
+}
+
+func (h *openAIStreamHoldController) heldSince() time.Time {
+	if h == nil {
+		return time.Time{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.state.HeldSince
+}
+
+func (h *openAIStreamHoldController) heldFor() time.Duration {
+	heldSince := h.heldSince()
+	if heldSince.IsZero() {
+		return 0
+	}
+	return max(time.Since(heldSince), 0)
+}
+
+func (h *openAIStreamHoldController) startHeartbeat(reqLog *zap.Logger) {
+	if h == nil || h.tracker == nil || h.tracker.HeartbeatInterval() <= 0 {
+		return
+	}
+	h.mu.Lock()
+	if h.heartbeatCancel != nil || h.finished {
+		h.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.heartbeatCancel = cancel
+	h.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(h.tracker.HeartbeatInterval())
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.persist(reqLog, "heartbeat")
+			}
+		}
+	}()
+}
+
+func (h *openAIStreamHoldController) persist(reqLog *zap.Logger, operation string) {
+	if h == nil || h.tracker == nil {
+		return
+	}
+	h.trackingOpMu.Lock()
+	defer h.trackingOpMu.Unlock()
+
+	h.mu.Lock()
+	if h.finished {
+		h.mu.Unlock()
+		return
+	}
+	state := h.state
+	h.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), h.tracker.OperationTimeout())
+	err := h.tracker.Upsert(ctx, &state)
+	cancel()
+
+	h.mu.Lock()
+	previouslyFailed := h.trackingWriteFailed
+	h.trackingWriteFailed = err != nil
+	h.mu.Unlock()
+	if err != nil {
+		if !previouslyFailed && reqLog != nil {
+			reqLog.Error("openai.stream_hold_tracking_failed",
+				zap.String("operation", operation),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+	if previouslyFailed && reqLog != nil {
+		reqLog.Info("openai.stream_hold_tracking_restored",
+			zap.String("operation", operation),
+		)
+	}
+}
+
+func (h *openAIStreamHoldController) finish(reqLog *zap.Logger, outcome string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.finished || h.state.HeldSince.IsZero() {
+		h.mu.Unlock()
+		return
+	}
+	h.finished = true
+	leaseID := h.state.LeaseID
+	heartbeatCancel := h.heartbeatCancel
+	h.heartbeatCancel = nil
+	h.mu.Unlock()
+
+	if heartbeatCancel != nil {
+		heartbeatCancel()
+	}
+
+	var deleteErr error
+	if h.tracker != nil {
+		h.trackingOpMu.Lock()
+		ctx, cancel := context.WithTimeout(context.Background(), h.tracker.OperationTimeout())
+		deleteErr = h.tracker.Delete(ctx, leaseID)
+		cancel()
+		h.trackingOpMu.Unlock()
+	}
+	if reqLog != nil {
+		fields := []zap.Field{
+			zap.String("outcome", outcome),
+			zap.Int("hold_cycles", h.waitCount),
+			zap.Duration("held_for", h.heldFor()),
+		}
+		if deleteErr != nil {
+			fields = append(fields, zap.Error(deleteErr))
+			reqLog.Error("openai.stream_hold_tracking_finished", fields...)
+		} else {
+			reqLog.Info("openai.stream_hold_tracking_finished", fields...)
+		}
+	}
 }
 
 func openAIStreamHoldFailoverReason(err *service.UpstreamFailoverError) (openAIStreamHoldReason, bool) {

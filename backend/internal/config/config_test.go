@@ -1933,6 +1933,28 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.openai_stream_hold.max_duration",
 		},
 		{
+			name:    "gateway openai stream hold tracking heartbeat non-positive",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval = 0 },
+			wantErr: "gateway.openai_stream_hold.tracking_heartbeat_interval",
+		},
+		{
+			name:    "gateway openai stream hold tracking lease too short",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingLeaseTTL = 20 * time.Second },
+			wantErr: "gateway.openai_stream_hold.tracking_lease_ttl",
+		},
+		{
+			name:    "gateway openai stream hold tracking operation timeout non-positive",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingOperationTimeout = 0 },
+			wantErr: "gateway.openai_stream_hold.tracking_operation_timeout",
+		},
+		{
+			name: "gateway openai stream hold tracking operation timeout too long",
+			mutate: func(c *Config) {
+				c.Gateway.OpenAIStreamHold.TrackingOperationTimeout = c.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval
+			},
+			wantErr: "gateway.openai_stream_hold.tracking_operation_timeout",
+		},
+		{
 			name:    "gateway image concurrency max waiting negative",
 			mutate:  func(c *Config) { c.Gateway.ImageConcurrency.MaxWaitingRequests = -1 },
 			wantErr: "gateway.image_concurrency.max_waiting_requests must be non-negative",
@@ -2562,6 +2584,15 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.OpenAIStreamHold.MaxDuration != 0 {
 		t.Fatalf("openai_stream_hold.max_duration = %s, want 0s", cfg.Gateway.OpenAIStreamHold.MaxDuration)
+	}
+	if cfg.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval != 10*time.Second {
+		t.Fatalf("openai_stream_hold.tracking_heartbeat_interval = %s, want 10s", cfg.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval)
+	}
+	if cfg.Gateway.OpenAIStreamHold.TrackingLeaseTTL != 45*time.Second {
+		t.Fatalf("openai_stream_hold.tracking_lease_ttl = %s, want 45s", cfg.Gateway.OpenAIStreamHold.TrackingLeaseTTL)
+	}
+	if cfg.Gateway.OpenAIStreamHold.TrackingOperationTimeout != 2*time.Second {
+		t.Fatalf("openai_stream_hold.tracking_operation_timeout = %s, want 2s", cfg.Gateway.OpenAIStreamHold.TrackingOperationTimeout)
 	}
 	if cfg.Gateway.ImageConcurrency.Enabled {
 		t.Fatalf("image_concurrency.enabled = true, want false")
