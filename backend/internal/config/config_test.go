@@ -1907,11 +1907,6 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be non-negative",
 		},
 		{
-			name:    "gateway openai stream hold response header timeout too small",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.ResponseHeaderTimeout = 500 * time.Millisecond },
-			wantErr: "gateway.openai_stream_hold.response_header_timeout",
-		},
-		{
 			name:    "gateway openai stream hold retry interval non-positive",
 			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MinRetryInterval = 0 },
 			wantErr: "gateway.openai_stream_hold.min_retry_interval",
@@ -2552,9 +2547,6 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.OpenAIStreamHold.Enabled {
 		t.Fatal("openai_stream_hold.enabled = true, want false")
-	}
-	if cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout != 10*time.Second {
-		t.Fatalf("openai_stream_hold.response_header_timeout = %s, want 10s", cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout)
 	}
 	if cfg.Gateway.OpenAIStreamHold.MinRetryInterval != time.Second {
 		t.Fatalf("openai_stream_hold.min_retry_interval = %s, want 1s", cfg.Gateway.OpenAIStreamHold.MinRetryInterval)

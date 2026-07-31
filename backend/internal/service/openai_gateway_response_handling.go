@@ -748,20 +748,6 @@ func (s *OpenAIGatewayService) OpenAIStreamHoldEnabled() bool {
 	return s != nil && s.settingService != nil && s.settingService.IsOpenAIStreamHoldEnabled()
 }
 
-func (s *OpenAIGatewayService) withOpenAIResponsesStreamHoldTransport(
-	ctx context.Context,
-	c *gin.Context,
-	stream bool,
-) context.Context {
-	if !stream || !s.openAIResponsesStreamHoldEnabled(c) {
-		return ctx
-	}
-	return WithHTTPUpstreamResponseHeaderTimeout(
-		ctx,
-		s.cfg.Gateway.OpenAIStreamHold.ResponseHeaderTimeout,
-	)
-}
-
 // extractOpenAISSEDataLine 低开销提取 SSE `data:` 行内容。
 // 兼容 `data: xxx` 与 `data:xxx` 两种格式。
 func extractOpenAISSEDataLine(line string) (string, bool) {

@@ -474,7 +474,6 @@ gateway:
   # 成功或客户端断开。
   openai_stream_hold:
     enabled: false
-    response_header_timeout: 10s
     min_retry_interval: 1s
     max_retry_interval: 30s
     retry_jitter_ratio: 0.2

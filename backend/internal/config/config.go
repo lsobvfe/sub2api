@@ -879,8 +879,6 @@ type ImageConcurrencyConfig struct {
 type GatewayOpenAIStreamHoldConfig struct {
 	// Enabled keeps retryable requests open instead of returning a terminal error.
 	Enabled bool `mapstructure:"enabled"`
-	// ResponseHeaderTimeout bounds one upstream attempt before response headers arrive.
-	ResponseHeaderTimeout time.Duration `mapstructure:"response_header_timeout"`
 	// MinRetryInterval is the initial delay between exhausted scheduling cycles.
 	MinRetryInterval time.Duration `mapstructure:"min_retry_interval"`
 	// MaxRetryInterval caps exponential retry backoff.
@@ -2310,7 +2308,6 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_concurrency.wait_timeout_seconds", 30)
 	viper.SetDefault("gateway.image_concurrency.max_waiting_requests", 100)
 	viper.SetDefault("gateway.openai_stream_hold.enabled", false)
-	viper.SetDefault("gateway.openai_stream_hold.response_header_timeout", 10*time.Second)
 	viper.SetDefault("gateway.openai_stream_hold.min_retry_interval", time.Second)
 	viper.SetDefault("gateway.openai_stream_hold.max_retry_interval", 30*time.Second)
 	viper.SetDefault("gateway.openai_stream_hold.retry_jitter_ratio", 0.2)
@@ -3160,14 +3157,10 @@ func (c *Config) Validate() error {
 	}
 	streamHold := c.Gateway.OpenAIStreamHold
 	if streamHold.Enabled ||
-		streamHold.ResponseHeaderTimeout != 0 ||
 		streamHold.MinRetryInterval != 0 ||
 		streamHold.MaxRetryInterval != 0 ||
 		streamHold.RetryJitterRatio != 0 ||
 		streamHold.MaxDuration != 0 {
-		if streamHold.ResponseHeaderTimeout < time.Second {
-			return fmt.Errorf("gateway.openai_stream_hold.response_header_timeout must be at least 1s")
-		}
 		if streamHold.MinRetryInterval <= 0 {
 			return fmt.Errorf("gateway.openai_stream_hold.min_retry_interval must be positive")
 		}

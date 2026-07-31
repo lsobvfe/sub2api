@@ -23,12 +23,11 @@ import (
 
 func testOpenAIStreamHoldConfig() config.GatewayOpenAIStreamHoldConfig {
 	return config.GatewayOpenAIStreamHoldConfig{
-		Enabled:               true,
-		ResponseHeaderTimeout: 15 * time.Millisecond,
-		MinRetryInterval:      20 * time.Millisecond,
-		MaxRetryInterval:      40 * time.Millisecond,
-		RetryJitterRatio:      0,
-		MaxDuration:           0,
+		Enabled:          true,
+		MinRetryInterval: 20 * time.Millisecond,
+		MaxRetryInterval: 40 * time.Millisecond,
+		RetryJitterRatio: 0,
+		MaxDuration:      0,
 	}
 }
 
@@ -185,9 +184,9 @@ func TestOpenAIResponsesStreamHoldRecoversAfterFailoverExhaustion(t *testing.T) 
 	require.Equal(t, http.StatusOK, resp.StatusCode, "body=%s calls=%d timeouts=%v", responseBody, upstream.callCount(), upstream.responseHeaderTimeouts())
 	require.Equal(t, 3, upstream.callCount())
 	require.Equal(t, []time.Duration{
-		15 * time.Millisecond,
-		15 * time.Millisecond,
-		15 * time.Millisecond,
+		0,
+		0,
+		0,
 	}, upstream.responseHeaderTimeouts())
 	require.NotContains(t, string(responseBody), string(SSEPingFormatComment))
 	require.Contains(t, string(responseBody), `"type":"response.completed"`)
