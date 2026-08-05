@@ -1910,6 +1910,16 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be non-negative",
 		},
 		{
+			name:    "gateway openai stream hold upstream attempt timeout non-positive",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.UpstreamAttemptTimeout = 0 },
+			wantErr: "gateway.openai_stream_hold.upstream_attempt_timeout",
+		},
+		{
+			name:    "gateway openai stream hold upstream attempt timeout too long",
+			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.UpstreamAttemptTimeout = 31 * time.Minute },
+			wantErr: "gateway.openai_stream_hold.upstream_attempt_timeout",
+		},
+		{
 			name:    "gateway openai stream hold retry interval non-positive",
 			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MinRetryInterval = 0 },
 			wantErr: "gateway.openai_stream_hold.min_retry_interval",

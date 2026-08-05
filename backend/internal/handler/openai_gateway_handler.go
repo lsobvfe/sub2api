@@ -311,15 +311,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 	reqModel := modelResult.String()
+	requestContextBase := c.Request.Context()
+	policySourceBody := body
 	ensureCompositeTargetPlatform(c, apiKey, reqModel)
 	if !compositeTargetPlatformAllowed(c, apiKey, reqModel, service.PlatformOpenAI, service.PlatformGrok) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
-	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformOpenAI {
-		if cappedBody, changed := service.ApplyOpenAIReasoningEffortPolicy(body, apiKey.Group.MaxReasoningEffort, apiKey.Group.ReasoningEffortMappings); changed {
-			body = cappedBody
-		}
+	if cappedBody, changed := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); changed {
+		body = cappedBody
 	}
 
 	reqStream, ok := parseOpenAICompatibleStream(body)
@@ -396,6 +396,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// Get subscription info (may be nil)
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
 	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	requiredCapability := openAIResponsesRequiredCapability(imageIntent, requestPlatform)
+	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
+	c.Request = c.Request.WithContext(pricingCtx)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -410,6 +413,87 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	defer func() {
 		streamHold.Close(reqLog, c.Request.Context())
 	}()
+	refreshHeldRequestState := func(recheckBilling bool) error {
+		runtimeState, err := h.apiKeyService.LoadGatewayRuntimeState(c.Request.Context(), apiKey.ID)
+		if err != nil {
+			return err
+		}
+		if runtimeState.APIKey.User == nil || runtimeState.APIKey.User.ID != subject.UserID {
+			return errors.New("api key owner changed while request was held")
+		}
+
+		oldGroupID := apiKey.GroupID
+		oldPlatform := requestPlatform
+		refreshedAPIKey := runtimeState.APIKey
+		refreshedContext := context.WithValue(requestContextBase, ctxkey.Group, refreshedAPIKey.Group)
+		c.Request = c.Request.WithContext(refreshedContext)
+		ensureCompositeTargetPlatform(c, refreshedAPIKey, reqModel)
+		if !compositeTargetPlatformAllowed(c, refreshedAPIKey, reqModel, service.PlatformOpenAI, service.PlatformGrok) {
+			return errors.New("refreshed API key group does not support the requested model")
+		}
+		refreshedPlatform := openAICompatibleRequestPlatform(c.Request.Context(), refreshedAPIKey)
+		if imageIntent && !service.GroupAllowsImageGeneration(refreshedAPIKey.Group) {
+			return errors.New("refreshed API key group does not allow image generation")
+		}
+
+		refreshedBody := policySourceBody
+		if cappedBody, changed := applyOpenAIReasoningEffortPolicyForRequest(c, refreshedAPIKey, refreshedBody); changed {
+			refreshedBody = cappedBody
+		}
+		refreshedMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(
+			c.Request.Context(),
+			refreshedAPIKey.GroupID,
+			reqModel,
+		)
+		refreshedForwardBody := openAIModelMappedBody(
+			refreshedBody,
+			refreshedMapping.Mapped,
+			refreshedMapping.MappedModel,
+			h.gatewayService.ReplaceModelInBody,
+		)
+		seedOpenAIForwardImageIntentHint(c, refreshedMapping.Mapped, imageIntent)
+		if recheckBilling {
+			if err := h.billingCacheService.RecheckBillingEligibility(
+				c.Request.Context(),
+				refreshedAPIKey.User,
+				refreshedAPIKey,
+				refreshedAPIKey.Group,
+				runtimeState.Subscription,
+				service.QuotaPlatform(c.Request.Context(), refreshedAPIKey),
+			); err != nil {
+				return fmt.Errorf("recheck held request billing eligibility: %w", err)
+			}
+		}
+		refreshedPricingCtx, refreshedPricingAt := h.gatewayService.WithOpenAIRequestPricingContext(
+			c.Request.Context(),
+			refreshedAPIKey.GroupID,
+		)
+		c.Request = c.Request.WithContext(refreshedPricingCtx)
+
+		apiKey = refreshedAPIKey
+		subscription = runtimeState.Subscription
+		body = refreshedBody
+		channelMapping = refreshedMapping
+		forwardBody = refreshedForwardBody
+		requestPlatform = refreshedPlatform
+		requiredCapability = openAIResponsesRequiredCapability(imageIntent, refreshedPlatform)
+		pricingAt = refreshedPricingAt
+		c.Set(string(middleware2.ContextKeyAPIKey), refreshedAPIKey)
+		c.Set(string(middleware2.ContextKeySubscription), runtimeState.Subscription)
+		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{
+			UserID:      refreshedAPIKey.User.ID,
+			Concurrency: refreshedAPIKey.User.Concurrency,
+		})
+		streamHold.RequestStateRefreshed(reqLog, refreshedAPIKey, refreshedPlatform)
+		reqLog.Info("openai.stream_hold_request_state_refreshed",
+			zap.Any("old_group_id", oldGroupID),
+			zap.Any("new_group_id", refreshedAPIKey.GroupID),
+			zap.String("old_platform", oldPlatform),
+			zap.String("new_platform", refreshedPlatform),
+			zap.Int("hold_cycle", streamHold.waitCount),
+		)
+		return nil
+	}
 	userReleaseFunc, acquired := h.acquireResponsesUserSlot(c, subject.UserID, subject.Concurrency, reqStream, &streamStarted, reqLog, streamHold)
 	if !acquired {
 		return
@@ -417,6 +501,24 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 确保请求取消时也会释放槽位，避免长连接被动中断造成泄漏
 	if userReleaseFunc != nil {
 		defer userReleaseFunc()
+	}
+	for streamHold.RequestStateRefreshNeeded() {
+		if err := refreshHeldRequestState(false); err != nil {
+			reqLog.Warn("openai.stream_hold_request_state_refresh_failed",
+				zap.Int("hold_cycle", streamHold.waitCount),
+				zap.Error(err),
+			)
+			if streamHold.Wait(
+				c,
+				reqLog,
+				openAIStreamHoldRequestStateRefresh,
+				0,
+				openAIStreamHoldObservation{LastError: err.Error()},
+			) {
+				continue
+			}
+			return
+		}
 	}
 
 	// 2. Re-check billing eligibility after wait
@@ -450,11 +552,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	resetAttemptCycle := func() {
 		switchCount = 0
 		firstOutputTimeoutSwitchCount = 0
+		profitVetoCount = 0
 		failedAccountIDs = make(map[int64]struct{})
 		sameAccountRetryCount = make(map[int64]int)
 		lastFailoverErr = nil
 		lastAttemptAccountID = 0
 		oauth429FailoverState = service.OpenAIOAuth429FailoverState{}
+		passthroughFailoverState = openAIPassthroughFailoverState{}
 	}
 	holdFailover := func(failoverErr *service.UpstreamFailoverError) bool {
 		reason, ok := openAIStreamHoldFailoverReason(failoverErr)
@@ -482,26 +586,32 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return true
 	}
 
-	// 生图意图的 /v1/responses 请求必须调度到确实支持 Responses API 的账号，否则
-	// 会在 forward 阶段被静默降级为无法生图的 Chat Completions 直转（#4417）。
-	// 仅对 OpenAI 平台生效：Grok 生图走独立的 forwardGrokResponses 路径，不应被过滤。
-	// 复用前置权限与并发阶段在未修改 body 上确认的显式生图意图，避免大 tools 请求重复扫描。
-	// 该判断已排除 Codex 被动 image_gen namespace，避免 CC-only 账号被误过滤（#4476）。
-	requiredCapability := openAIResponsesRequiredCapability(imageIntent, requestPlatform)
-
-	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
-	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
-	// 生图意图只影响能力路由与图片计费，不关门：混合 /v1/responses 请求的
-	// token 计费部分仍受利润门保护，独立图片/视频端点才在门外。
-	pricingCtx, pricingAt := h.gatewayService.WithOpenAIRequestPricingContext(c.Request.Context(), apiKey.GroupID)
-	c.Request = c.Request.WithContext(pricingCtx)
-
 	for {
 		// Streaming Forward intentionally detaches the upstream request so usage can
 		// be drained after a disconnect. Re-check the client context before every
 		// account attempt so a canceled request never starts a failover replay.
 		if !openAIRequestAllowsFailoverReplay(c) {
 			return
+		}
+		if streamHold.RequestStateRefreshNeeded() {
+			if err := refreshHeldRequestState(true); err != nil {
+				reqLog.Warn("openai.stream_hold_request_state_refresh_failed",
+					zap.Int("hold_cycle", streamHold.waitCount),
+					zap.Error(err),
+				)
+				if streamHold.Wait(
+					c,
+					reqLog,
+					openAIStreamHoldRequestStateRefresh,
+					0,
+					openAIStreamHoldObservation{LastError: err.Error()},
+				) {
+					resetAttemptCycle()
+					continue
+				}
+				return
+			}
+			resetAttemptCycle()
 		}
 		// Select account supporting the requested model
 		reqLog.Debug("openai.account_selecting", zap.Int("excluded_account_count", len(failedAccountIDs)))
@@ -668,6 +778,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(reqModel), false, nil)
 					}
+					if failoverErr.RequestScopedTransient {
+						reqLog.Warn("openai.upstream_request_scoped_transient",
+							zap.Int64("account_id", account.ID),
+							zap.Int("upstream_status", failoverErr.StatusCode),
+							zap.String("failure_scope", string(failoverErr.Scope)),
+							zap.String("failure_reason", string(failoverErr.Reason)),
+							zap.Bool("downstream_response_deferred", !c.Writer.Written()),
+						)
+					}
 					if !failoverErr.ShouldRetryNextAccount() {
 						if holdFailover(failoverErr) {
 							continue
@@ -704,15 +823,14 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
-					if !shouldSwitch {
+					if switchCount >= maxAccountSwitches {
 						if holdFailover(failoverErr) {
 							continue
 						}
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					switchCount = nextSwitchCount
+					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						if holdFailover(failoverErr) {
 							continue
@@ -1050,6 +1168,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Model is not supported by this OpenAI-compatible endpoint for composite groups")
 		return
 	}
+	bindOpenAIReasoningEffortPolicyForMessagesRequest(c, apiKey, body)
 	routingModel := service.NormalizeOpenAICompatRequestedModel(reqModel)
 	preferredMappedModel := resolveOpenAIMessagesDispatchMappedModel(apiKey, reqModel)
 	reqStream := gjson.GetBytes(body, "stream").Bool()
@@ -1275,12 +1394,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					h.gatewayService.RecordOpenAIAccountSwitch()
 					failedAccountIDs[account.ID] = struct{}{}
 					lastFailoverErr = failoverErr
-					nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
-					if !shouldSwitch {
+					if switchCount >= maxAccountSwitches {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
-					switchCount = nextSwitchCount
+					switchCount++
 					if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
@@ -1771,7 +1889,8 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	reqLog.Info("openai.websocket_ingress_started")
 	clientIP := ip.GetClientIP(c)
 	userAgent := strings.TrimSpace(c.GetHeader("User-Agent"))
-	ctx := c.Request.Context()
+	clientLifecycleCtx := c.Request.Context()
+	ctx := clientLifecycleCtx
 	maxIngressConnections := 0
 	if h.cfg != nil {
 		maxIngressConnections = h.cfg.Gateway.OpenAIWS.MaxIngressConnectionsPerAPIKey
@@ -1992,12 +2111,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		h.gatewayService.RecordOpenAIAccountSwitch()
 		failedAccountIDs[account.ID] = struct{}{}
 		lastFailoverErr = failoverErr
-		nextSwitchCount, shouldSwitch := nextOpenAIAccountFailoverSwitchCount(switchCount, maxAccountSwitches, failoverErr)
-		if !shouldSwitch {
+		if switchCount >= maxAccountSwitches {
 			closeOpenAIWSFailoverExhausted(wsConn, failoverErr)
 			return false
 		}
-		switchCount = nextSwitchCount
+		switchCount++
 		if h.gatewayService.ShouldStopOpenAIOAuth429Failover(account, failoverErr.StatusCode, switchCount, &oauth429FailoverState) {
 			closeOpenAIWSFailoverExhausted(wsConn, failoverErr)
 			return false
@@ -2166,12 +2284,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			zap.Int("candidate_count", scheduleDecision.CandidateCount),
 		)
 
-		maxReasoningEffort := ""
-		var reasoningEffortMappings []service.ReasoningEffortMapping
-		if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformOpenAI {
-			maxReasoningEffort = apiKey.Group.MaxReasoningEffort
-			reasoningEffortMappings = apiKey.Group.ReasoningEffortMappings
-		}
+		maxReasoningEffort, reasoningEffortMappings, _ := openAIReasoningEffortPolicyForRequest(c, apiKey)
 		var requestPayloadHash string
 		// Passthrough rejects overlapping response.create frames, so one immutable
 		// turn-tagged slot preserves the exact mapping used for the in-flight request.
@@ -2182,6 +2295,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// openAIWSTurnPricing 的注释——绝不能用建连时刻初始化。
 		var turnPricing openAIWSTurnPricing
 		hooks := &service.OpenAIWSIngressHooks{
+			ClientLifecycleContext:  clientLifecycleCtx,
 			InitialRequestModel:     reqModel,
 			MaxReasoningEffort:      maxReasoningEffort,
 			ReasoningEffortMappings: reasoningEffortMappings,

@@ -100,6 +100,7 @@ func runPassthroughFlushTest(
 		time.Now(),
 		"",
 		"",
+		0,
 	)
 	return result, recorder, writer, err
 }

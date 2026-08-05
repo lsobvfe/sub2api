@@ -26,6 +26,7 @@ const (
 	openAIStreamHoldUpstreamRetryable   openAIStreamHoldReason = "upstream_retryable"
 	openAIStreamHoldUpstreamRateLimit   openAIStreamHoldReason = "upstream_rate_limit"
 	openAIStreamHoldUpstreamUnavailable openAIStreamHoldReason = "upstream_unavailable"
+	openAIStreamHoldRequestStateRefresh openAIStreamHoldReason = "request_state_refresh"
 )
 
 type openAIStreamHoldObservation struct {
@@ -51,6 +52,7 @@ type openAIStreamHoldController struct {
 	finished            bool
 	heartbeatCancel     context.CancelFunc
 	trackingWriteFailed bool
+	requestStateRefresh bool
 }
 
 func newOpenAIStreamHoldController(
@@ -226,6 +228,9 @@ func (h *openAIStreamHoldController) Wait(
 				return false
 			}
 			h.advanceBackoff()
+			h.mu.Lock()
+			h.requestStateRefresh = true
+			h.mu.Unlock()
 			h.updateTrackingState(
 				service.OpenAIStreamHoldPhaseRetrying,
 				reason,
@@ -250,6 +255,41 @@ func (h *openAIStreamHoldController) Wait(
 			}
 		}
 	}
+}
+
+func (h *openAIStreamHoldController) RequestStateRefreshNeeded() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.requestStateRefresh && !h.finished
+}
+
+func (h *openAIStreamHoldController) RequestStateRefreshed(
+	reqLog *zap.Logger,
+	apiKey *service.APIKey,
+	platform string,
+) {
+	if h == nil || apiKey == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.finished {
+		h.mu.Unlock()
+		return
+	}
+	h.requestStateRefresh = false
+	h.state.Platform = platform
+	h.state.APIKeyID = apiKey.ID
+	h.state.GroupID = nil
+	if apiKey.GroupID != nil {
+		groupID := *apiKey.GroupID
+		h.state.GroupID = &groupID
+	}
+	h.state.UpdatedAt = time.Now().UTC()
+	h.mu.Unlock()
+	h.persist(reqLog, "request_state_refreshed")
 }
 
 func (h *openAIStreamHoldController) jitteredRetryInterval(base time.Duration) time.Duration {
