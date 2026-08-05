@@ -480,24 +480,6 @@ gateway:
   # Non-streaming Images JSON keepalive interval (seconds), 0=disable; commits HTTP 200 after the first heartbeat
   # 图片非流式 JSON keepalive 间隔（秒），0=禁用；首个心跳后 HTTP 状态会固化为 200
   image_nonstream_keepalive_interval: 0
-  # Keep streaming Responses requests pending across temporary scheduling/upstream failures.
-  # The HTTP/SSE response is not started before real semantic output; 0s max_duration
-  # waits until success or client cancellation.
-  # 在首个真实语义输出前不提交 HTTP/SSE 响应；max_duration=0s 表示一直等待到
-  # 成功或客户端断开。
-  openai_stream_hold:
-    enabled: false
-    # Bound one upstream connection attempt; the downstream request remains held and retries after this deadline.
-    # 限制单次上游连接尝试；到期后仅切换/重试上游，下游请求仍保持等待。
-    upstream_attempt_timeout: 3m
-    min_retry_interval: 1s
-    max_retry_interval: 30s
-    retry_jitter_ratio: 0.2
-    max_duration: 0s
-    # Active hold observability uses Redis leases; lease TTL must be at least 3x heartbeat.
-    tracking_heartbeat_interval: 10s
-    tracking_lease_ttl: 45s
-    tracking_operation_timeout: 2s
   # Image generation independent concurrency limiter (process-local, default disabled)
   # 图片生成独立并发限制（进程级，默认关闭；多实例总上限约为实例数×该值）
   image_concurrency:

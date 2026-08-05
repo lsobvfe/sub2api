@@ -243,18 +243,6 @@ func (s *OpenAIGatewayService) openAIFirstOutputTimeout(reasoningEffort string) 
 	return time.Duration(seconds) * time.Second
 }
 
-func (s *OpenAIGatewayService) openAIFirstOutputTimeoutForRequest(c *gin.Context, reasoningEffort string) time.Duration {
-	timeout := s.openAIFirstOutputTimeout(reasoningEffort)
-	if s == nil || s.cfg == nil || !s.openAIResponsesStreamHoldEnabled(c) {
-		return timeout
-	}
-	holdTimeout := s.cfg.Gateway.OpenAIStreamHold.UpstreamAttemptTimeout
-	if timeout <= 0 || (holdTimeout > 0 && holdTimeout < timeout) {
-		return holdTimeout
-	}
-	return timeout
-}
-
 func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	ctx context.Context,
 	c *gin.Context,

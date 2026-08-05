@@ -45,10 +45,9 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel, reasoningEffort string) (*openaiStreamingResult, error) {
 	firstOutputTimeout := time.Duration(0)
 	if account != nil && account.Platform == PlatformOpenAI {
-		firstOutputTimeout = s.openAIFirstOutputTimeoutForRequest(c, reasoningEffort)
+		firstOutputTimeout = s.openAIFirstOutputTimeout(reasoningEffort)
 	}
-	streamHoldEnabled := s.openAIResponsesStreamHoldEnabled(c)
-	guardFirstOutput := firstOutputTimeout > 0 || streamHoldEnabled
+	guardFirstOutput := firstOutputTimeout > 0
 	var attemptResponseHeaders http.Header
 	if guardFirstOutput {
 		if s.responseHeaderFilter != nil {
@@ -148,7 +147,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	documentScanner := newOpenAISSEJSONDocumentScanner(scanner)
 
 	streamInterval := time.Duration(0)
-	if s.cfg != nil && !streamHoldEnabled && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	// 仅监控上游数据间隔超时，不被下游写入阻塞影响
@@ -201,7 +200,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		firstOutputTimer = nil
 		firstOutputCh = nil
 	}
-	// Track downstream writes separately from upstream reads.
+	// Track downstream writes separately from upstream reads: pre-output failover
+	// can buffer response.created / response.in_progress, so keepalive must be
+	// based on downstream idle time.
 	lastDownstreamWriteAt := time.Now()
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱。
@@ -707,17 +708,22 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if clientDisconnected {
 				continue
 			}
-			// Stream-hold must not commit HTTP/SSE before the first semantic
-			// output. Codex starts its SSE idle watchdog when the response begins
-			// and intentionally ignores comments, so comment keepalives would
-			// eventually force a reconnect.
-			if guardFirstOutput && firstTokenMs == nil {
-				continue
-			}
 			if eventInProgress {
 				continue
 			}
 			if time.Since(lastDownstreamWriteAt) < keepaliveInterval {
+				continue
+			}
+			if guardFirstOutput {
+				// Bypass attempt-local buffered frames. The stable SSE headers may be
+				// committed here, but account headers remain private until semantic output.
+				if _, err := w.Write([]byte(":\n\n")); err != nil {
+					clientDisconnected = true
+					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming, continuing to drain upstream for billing")
+					continue
+				}
+				flusher.Flush()
+				lastDownstreamWriteAt = time.Now()
 				continue
 			}
 			if _, err := writePendingString(":\n\n"); err != nil {
@@ -734,18 +740,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		}
 	}
 
-}
-
-func (s *OpenAIGatewayService) openAIResponsesStreamHoldEnabled(c *gin.Context) bool {
-	if !s.OpenAIStreamHoldEnabled() || c == nil || c.Request == nil || c.Request.URL == nil {
-		return false
-	}
-	path := strings.TrimRight(strings.TrimSpace(c.Request.URL.Path), "/")
-	return strings.HasSuffix(path, "/responses") || strings.Contains(path, "/responses/")
-}
-
-func (s *OpenAIGatewayService) OpenAIStreamHoldEnabled() bool {
-	return s != nil && s.settingService != nil && s.settingService.IsOpenAIStreamHoldEnabled()
 }
 
 // extractOpenAISSEDataLine 低开销提取 SSE `data:` 行内容。

@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stream Hold</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #f4f6f8;
+        color: #17202a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: #f4f6f8;
+      }
+      main {
+        width: min(960px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 32px 0 48px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #d7dde3;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        line-height: 1.3;
+        letter-spacing: 0;
+      }
+      .summary {
+        margin: 6px 0 0;
+        color: #65717d;
+        font-size: 14px;
+      }
+      .switch {
+        position: relative;
+        width: 48px;
+        height: 28px;
+        flex: 0 0 auto;
+      }
+      .switch input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .track {
+        display: block;
+        width: 48px;
+        height: 28px;
+        border-radius: 14px;
+        background: #aab3bc;
+        cursor: pointer;
+        transition: background 140ms ease;
+      }
+      .track::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        left: 4px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgb(0 0 0 / 22%);
+        transition: transform 140ms ease;
+      }
+      input:checked + .track {
+        background: #16825d;
+      }
+      input:checked + .track::after {
+        transform: translateX(20px);
+      }
+      input:focus-visible + .track {
+        outline: 3px solid rgb(22 130 93 / 28%);
+        outline-offset: 2px;
+      }
+      section {
+        padding-top: 24px;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid #d7dde3;
+        border-radius: 6px;
+        background: #d7dde3;
+      }
+      .metric {
+        min-height: 84px;
+        padding: 16px;
+        background: #fff;
+      }
+      .metric span {
+        display: block;
+        color: #65717d;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      .metric strong {
+        display: block;
+        margin-top: 7px;
+        font-size: 22px;
+        font-weight: 650;
+      }
+      .table-wrap {
+        margin-top: 24px;
+        overflow-x: auto;
+        border: 1px solid #d7dde3;
+        border-radius: 6px;
+        background: #fff;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      th,
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid #e5e9ed;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: #65717d;
+        font-size: 11px;
+        font-weight: 650;
+        text-transform: uppercase;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+      .empty {
+        padding: 28px 14px;
+        color: #65717d;
+        text-align: center;
+      }
+      .error {
+        color: #b42318;
+        max-width: 360px;
+        overflow-wrap: anywhere;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root,
+        body {
+          background: #101418;
+          color: #edf1f4;
+        }
+        header,
+        .metrics,
+        .table-wrap {
+          border-color: #343c44;
+        }
+        .metrics {
+          background: #343c44;
+        }
+        .metric,
+        .table-wrap {
+          background: #171c21;
+        }
+        .summary,
+        .metric span,
+        th,
+        .empty {
+          color: #9da8b2;
+        }
+        th,
+        td {
+          border-color: #2b3239;
+        }
+        .error {
+          color: #ff8a80;
+        }
+      }
+      @media (max-width: 640px) {
+        main {
+          width: min(100% - 24px, 960px);
+          padding-top: 22px;
+        }
+        .metrics {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Stream Hold</h1>
+          <p id="statusText" class="summary">正在连接</p>
+        </div>
+        <label class="switch" title="启用或停用">
+          <input id="enabled" type="checkbox" aria-label="启用 Stream Hold" />
+          <span class="track"></span>
+        </label>
+      </header>
+
+      <section>
+        <div class="metrics">
+          <div class="metric">
+            <span>状态</span>
+            <strong id="mode">--</strong>
+          </div>
+          <div class="metric">
+            <span>活动请求</span>
+            <strong id="activeCount">0</strong>
+          </div>
+          <div class="metric">
+            <span>最近刷新</span>
+            <strong id="updatedAt">--</strong>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>请求</th>
+                <th>阶段</th>
+                <th>尝试</th>
+                <th>等待</th>
+                <th>最近错误</th>
+              </tr>
+            </thead>
+            <tbody id="holds"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const enabled = document.querySelector("#enabled");
+      const statusText = document.querySelector("#statusText");
+      const mode = document.querySelector("#mode");
+      const activeCount = document.querySelector("#activeCount");
+      const updatedAt = document.querySelector("#updatedAt");
+      const holds = document.querySelector("#holds");
+
+      function escapeHTML(value) {
+        const node = document.createElement("span");
+        node.textContent = String(value ?? "");
+        return node.innerHTML;
+      }
+
+      function elapsed(value) {
+        const seconds = Math.max(
+          0,
+          Math.floor((Date.now() - new Date(value).getTime()) / 1000),
+        );
+        if (seconds < 60) return `${seconds}s`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+        return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+      }
+
+      function render(state) {
+        enabled.checked = state.enabled;
+        mode.textContent = state.enabled ? "启用" : "停用";
+        activeCount.textContent = String(state.active_count);
+        updatedAt.textContent = new Date(state.timestamp).toLocaleTimeString();
+        statusText.textContent = state.enabled
+          ? "新流式请求由独立代理接管"
+          : "新请求直接转发到 Sub2API";
+
+        if (!state.active.length) {
+          holds.innerHTML =
+            '<tr><td class="empty" colspan="5">当前没有活动请求</td></tr>';
+          return;
+        }
+        holds.innerHTML = state.active
+          .map(
+            (item) => `
+              <tr>
+                <td>${escapeHTML(item.request_id)}<br />${escapeHTML(item.path)}</td>
+                <td>${escapeHTML(item.phase)}</td>
+                <td>${item.attempts}</td>
+                <td>${elapsed(item.started_at)}</td>
+                <td class="error">${escapeHTML(item.last_error || "")}</td>
+              </tr>`,
+          )
+          .join("");
+      }
+
+      async function refresh() {
+        try {
+          const response = await fetch("/_stream-hold/api/state", {
+            cache: "no-store",
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          render(await response.json());
+        } catch (error) {
+          statusText.textContent = `连接失败: ${error.message}`;
+        }
+      }
+
+      enabled.addEventListener("change", async () => {
+        enabled.disabled = true;
+        try {
+          const response = await fetch("/_stream-hold/api/enabled", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: enabled.checked }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await refresh();
+        } catch (error) {
+          statusText.textContent = `更新失败: ${error.message}`;
+          await refresh();
+        } finally {
+          enabled.disabled = false;
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>

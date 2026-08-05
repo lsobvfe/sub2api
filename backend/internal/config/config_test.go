@@ -1910,61 +1910,6 @@ func TestValidateConfigErrors(t *testing.T) {
 			wantErr: "gateway.image_concurrency.wait_timeout_seconds must be non-negative",
 		},
 		{
-			name:    "gateway openai stream hold upstream attempt timeout non-positive",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.UpstreamAttemptTimeout = 0 },
-			wantErr: "gateway.openai_stream_hold.upstream_attempt_timeout",
-		},
-		{
-			name:    "gateway openai stream hold upstream attempt timeout too long",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.UpstreamAttemptTimeout = 31 * time.Minute },
-			wantErr: "gateway.openai_stream_hold.upstream_attempt_timeout",
-		},
-		{
-			name:    "gateway openai stream hold retry interval non-positive",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MinRetryInterval = 0 },
-			wantErr: "gateway.openai_stream_hold.min_retry_interval",
-		},
-		{
-			name: "gateway openai stream hold retry interval inverted",
-			mutate: func(c *Config) {
-				c.Gateway.OpenAIStreamHold.MinRetryInterval = 31 * time.Second
-				c.Gateway.OpenAIStreamHold.MaxRetryInterval = 30 * time.Second
-			},
-			wantErr: "gateway.openai_stream_hold.max_retry_interval",
-		},
-		{
-			name:    "gateway openai stream hold retry jitter invalid",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.RetryJitterRatio = 1.1 },
-			wantErr: "gateway.openai_stream_hold.retry_jitter_ratio",
-		},
-		{
-			name:    "gateway openai stream hold duration negative",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.MaxDuration = -time.Second },
-			wantErr: "gateway.openai_stream_hold.max_duration",
-		},
-		{
-			name:    "gateway openai stream hold tracking heartbeat non-positive",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval = 0 },
-			wantErr: "gateway.openai_stream_hold.tracking_heartbeat_interval",
-		},
-		{
-			name:    "gateway openai stream hold tracking lease too short",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingLeaseTTL = 20 * time.Second },
-			wantErr: "gateway.openai_stream_hold.tracking_lease_ttl",
-		},
-		{
-			name:    "gateway openai stream hold tracking operation timeout non-positive",
-			mutate:  func(c *Config) { c.Gateway.OpenAIStreamHold.TrackingOperationTimeout = 0 },
-			wantErr: "gateway.openai_stream_hold.tracking_operation_timeout",
-		},
-		{
-			name: "gateway openai stream hold tracking operation timeout too long",
-			mutate: func(c *Config) {
-				c.Gateway.OpenAIStreamHold.TrackingOperationTimeout = c.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval
-			},
-			wantErr: "gateway.openai_stream_hold.tracking_operation_timeout",
-		},
-		{
 			name:    "gateway image concurrency max waiting negative",
 			mutate:  func(c *Config) { c.Gateway.ImageConcurrency.MaxWaitingRequests = -1 },
 			wantErr: "gateway.image_concurrency.max_waiting_requests must be non-negative",
@@ -2579,30 +2524,6 @@ func TestLoad_DefaultGatewayImageStreamConfig(t *testing.T) {
 	}
 	if cfg.Gateway.ImageNonstreamKeepaliveInterval != 0 {
 		t.Fatalf("image_nonstream_keepalive_interval = %d, want 0", cfg.Gateway.ImageNonstreamKeepaliveInterval)
-	}
-	if cfg.Gateway.OpenAIStreamHold.Enabled {
-		t.Fatal("openai_stream_hold.enabled = true, want false")
-	}
-	if cfg.Gateway.OpenAIStreamHold.MinRetryInterval != time.Second {
-		t.Fatalf("openai_stream_hold.min_retry_interval = %s, want 1s", cfg.Gateway.OpenAIStreamHold.MinRetryInterval)
-	}
-	if cfg.Gateway.OpenAIStreamHold.MaxRetryInterval != 30*time.Second {
-		t.Fatalf("openai_stream_hold.max_retry_interval = %s, want 30s", cfg.Gateway.OpenAIStreamHold.MaxRetryInterval)
-	}
-	if cfg.Gateway.OpenAIStreamHold.RetryJitterRatio != 0.2 {
-		t.Fatalf("openai_stream_hold.retry_jitter_ratio = %v, want 0.2", cfg.Gateway.OpenAIStreamHold.RetryJitterRatio)
-	}
-	if cfg.Gateway.OpenAIStreamHold.MaxDuration != 0 {
-		t.Fatalf("openai_stream_hold.max_duration = %s, want 0s", cfg.Gateway.OpenAIStreamHold.MaxDuration)
-	}
-	if cfg.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval != 10*time.Second {
-		t.Fatalf("openai_stream_hold.tracking_heartbeat_interval = %s, want 10s", cfg.Gateway.OpenAIStreamHold.TrackingHeartbeatInterval)
-	}
-	if cfg.Gateway.OpenAIStreamHold.TrackingLeaseTTL != 45*time.Second {
-		t.Fatalf("openai_stream_hold.tracking_lease_ttl = %s, want 45s", cfg.Gateway.OpenAIStreamHold.TrackingLeaseTTL)
-	}
-	if cfg.Gateway.OpenAIStreamHold.TrackingOperationTimeout != 2*time.Second {
-		t.Fatalf("openai_stream_hold.tracking_operation_timeout = %s, want 2s", cfg.Gateway.OpenAIStreamHold.TrackingOperationTimeout)
 	}
 	if cfg.Gateway.ImageConcurrency.Enabled {
 		t.Fatalf("image_concurrency.enabled = true, want false")

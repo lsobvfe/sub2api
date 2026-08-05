@@ -203,54 +203,6 @@
 
         <!-- Tab: Gateway -->
         <div v-show="activeTab === 'gateway'" class="space-y-6">
-          <!-- OpenAI Stream Hold -->
-          <div class="card" data-testid="openai-stream-hold-settings">
-            <div
-              class="border-b border-gray-100 px-6 py-4 dark:border-dark-700"
-            >
-              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">
-                {{ t("admin.settings.openaiStreamHold.title") }}
-              </h2>
-              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                {{ t("admin.settings.openaiStreamHold.description") }}
-              </p>
-            </div>
-            <div class="p-6">
-              <div
-                v-if="openAIStreamHoldLoading"
-                class="flex items-center gap-2 text-gray-500"
-              >
-                <div
-                  class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"
-                ></div>
-                {{ t("common.loading") }}
-              </div>
-              <div v-else class="flex items-center justify-between gap-4">
-                <div>
-                  <label class="font-medium text-gray-900 dark:text-white">
-                    {{ t("admin.settings.openaiStreamHold.enabled") }}
-                  </label>
-                  <p class="text-sm text-gray-500 dark:text-gray-400">
-                    {{
-                      openAIStreamHoldLoadFailed
-                        ? t("admin.settings.openaiStreamHold.loadFailed")
-                        : t("admin.settings.openaiStreamHold.enabledHint")
-                    }}
-                  </p>
-                </div>
-                <Toggle
-                  :model-value="openAIStreamHoldForm.enabled"
-                  :disabled="
-                    openAIStreamHoldSaving || openAIStreamHoldLoadFailed
-                  "
-                  :aria-label="t('admin.settings.openaiStreamHold.enabled')"
-                  data-testid="openai-stream-hold-enabled"
-                  @update:model-value="setOpenAIStreamHoldEnabled"
-                />
-              </div>
-            </div>
-          </div>
-
           <!-- Overload Cooldown (529) Settings -->
           <div class="card">
             <div
@@ -8646,13 +8598,6 @@ const adminApiKeyOperating = ref(false);
 const newAdminApiKey = ref("");
 const subscriptionGroups = ref<AdminGroup[]>([]);
 
-const openAIStreamHoldLoading = ref(true);
-const openAIStreamHoldSaving = ref(false);
-const openAIStreamHoldLoadFailed = ref(false);
-const openAIStreamHoldForm = reactive({
-  enabled: false,
-});
-
 // Upstream billing probe state
 const upstreamBillingProbeLoading = ref(true);
 const upstreamBillingProbeSaving = ref(false);
@@ -11369,55 +11314,6 @@ function copyNewKey() {
     });
 }
 
-async function loadOpenAIStreamHoldSettings() {
-  openAIStreamHoldLoading.value = true;
-  openAIStreamHoldLoadFailed.value = false;
-  try {
-    Object.assign(
-      openAIStreamHoldForm,
-      await adminAPI.settings.getOpenAIStreamHoldSettings(),
-    );
-  } catch (error: unknown) {
-    openAIStreamHoldLoadFailed.value = true;
-    appStore.showError(
-      extractApiErrorMessage(
-        error,
-        t("admin.settings.openaiStreamHold.loadFailed"),
-      ),
-    );
-  } finally {
-    openAIStreamHoldLoading.value = false;
-  }
-}
-
-async function setOpenAIStreamHoldEnabled(enabled: boolean) {
-  if (openAIStreamHoldSaving.value || openAIStreamHoldLoadFailed.value) {
-    return;
-  }
-  openAIStreamHoldSaving.value = true;
-  try {
-    const updated =
-      await adminAPI.settings.updateOpenAIStreamHoldSettings({ enabled });
-    Object.assign(openAIStreamHoldForm, updated);
-    appStore.showSuccess(
-      t(
-        updated.enabled
-          ? "admin.settings.openaiStreamHold.enabledSuccess"
-          : "admin.settings.openaiStreamHold.disabledSuccess",
-      ),
-    );
-  } catch (error: unknown) {
-    appStore.showError(
-      extractApiErrorMessage(
-        error,
-        t("admin.settings.openaiStreamHold.saveFailed"),
-      ),
-    );
-  } finally {
-    openAIStreamHoldSaving.value = false;
-  }
-}
-
 async function loadUpstreamBillingProbeSettings() {
   upstreamBillingProbeLoading.value = true;
   try {
@@ -12216,7 +12112,6 @@ onMounted(() => {
   loadSettings();
   loadSubscriptionGroups();
   loadAdminApiKey();
-  loadOpenAIStreamHoldSettings();
   loadUpstreamBillingProbeSettings();
   loadOllamaCloudUsageSettings();
   loadOverloadCooldownSettings();

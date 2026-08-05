@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"sync"
 	"testing"
 
@@ -50,65 +49,7 @@ func (u *openAIResponsesFailoverCancelUpstream) calls() []int64 {
 	return append([]int64(nil), u.accountIDs...)
 }
 
-type openAIResponsesRuntimeAPIKeyRepo struct {
-	service.APIKeyRepository
-	mu     sync.Mutex
-	calls  int
-	loader func(call int) *service.APIKey
-}
-
-func (r *openAIResponsesRuntimeAPIKeyRepo) GetByID(context.Context, int64) (*service.APIKey, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.calls++
-	apiKey := r.loader(r.calls)
-	if apiKey == nil {
-		return nil, service.ErrAPIKeyNotFound
-	}
-	copyKey := *apiKey
-	if apiKey.User != nil {
-		copyUser := *apiKey.User
-		copyKey.User = &copyUser
-	}
-	if apiKey.Group != nil {
-		copyGroup := *apiKey.Group
-		copyKey.Group = &copyGroup
-	}
-	return &copyKey, nil
-}
-
-func staticOpenAIResponsesRuntimeAPIKeyRepo() *openAIResponsesRuntimeAPIKeyRepo {
-	groupID := int64(3131)
-	return &openAIResponsesRuntimeAPIKeyRepo{
-		loader: func(int) *service.APIKey {
-			return &service.APIKey{
-				ID:      99,
-				UserID:  100,
-				GroupID: &groupID,
-				Status:  service.StatusActive,
-				User: &service.User{
-					ID:     100,
-					Status: service.StatusActive,
-				},
-				Group: &service.Group{
-					ID:       groupID,
-					Platform: service.PlatformOpenAI,
-					Status:   service.StatusActive,
-				},
-			}
-		},
-	}
-}
-
 func newOpenAIResponsesFailoverTestHandler(t *testing.T, upstream service.HTTPUpstream) *OpenAIGatewayHandler {
-	return newOpenAIResponsesFailoverTestHandlerWithConfig(t, upstream, nil)
-}
-
-func newOpenAIResponsesFailoverTestHandlerWithConfig(
-	t *testing.T,
-	upstream service.HTTPUpstream,
-	configure func(*config.Config),
-) *OpenAIGatewayHandler {
 	t.Helper()
 	accounts := []service.Account{
 		{
@@ -134,43 +75,8 @@ func newOpenAIResponsesFailoverTestHandlerWithConfig(
 			Credentials: map[string]any{"access_token": "token-2"},
 		},
 	}
-	return newOpenAIResponsesFailoverTestHandlerWithAccountsAndConfig(t, upstream, accounts, configure)
-}
-
-func newOpenAIResponsesFailoverTestHandlerWithAccountsAndConfig(
-	t *testing.T,
-	upstream service.HTTPUpstream,
-	accounts []service.Account,
-	configure func(*config.Config),
-) *OpenAIGatewayHandler {
-	t.Helper()
-	return newOpenAIResponsesFailoverTestHandlerWithRepositoryAndConfig(
-		t,
-		upstream,
-		openAIImagesFailoverAccountRepo{accounts: accounts},
-		configure,
-	)
-}
-
-func newOpenAIResponsesFailoverTestHandlerWithRepositoryAndConfig(
-	t *testing.T,
-	upstream service.HTTPUpstream,
-	accountRepo service.AccountRepository,
-	configure func(*config.Config),
-) *OpenAIGatewayHandler {
-	t.Helper()
+	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
 	cfg := &config.Config{RunMode: config.RunModeSimple}
-	if configure != nil {
-		configure(cfg)
-	}
-	var settingService *service.SettingService
-	if configure != nil {
-		settingRepo := &contentModerationHandlerSettingRepo{values: map[string]string{
-			service.SettingKeyOpenAIStreamHoldEnabled: strconv.FormatBool(cfg.Gateway.OpenAIStreamHold.Enabled),
-		}}
-		settingService = service.NewSettingService(settingRepo, cfg)
-		require.NoError(t, settingService.LoadOpenAIStreamHoldRuntime(context.Background()))
-	}
 	gatewayService := service.NewOpenAIGatewayService(
 		accountRepo,
 		nil,
@@ -192,19 +98,17 @@ func newOpenAIResponsesFailoverTestHandlerWithRepositoryAndConfig(
 		nil,
 		nil,
 		nil,
-		settingService,
+		nil,
 		nil,
 	)
 	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
 	t.Cleanup(billingService.Stop)
 	concurrencyService := service.NewConcurrencyService(nil)
-	apiKeyService := service.NewAPIKeyService(staticOpenAIResponsesRuntimeAPIKeyRepo(), nil, nil, nil, nil, nil, cfg)
 	handler := NewOpenAIGatewayHandler(
 		gatewayService,
 		concurrencyService,
 		billingService,
-		apiKeyService,
-		nil,
+		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
 		nil,
 		nil,
 		nil,

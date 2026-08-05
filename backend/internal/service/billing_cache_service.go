@@ -733,24 +733,6 @@ func (s *BillingCacheService) IncrementUserPlatformQuotaUsage(userID int64, plat
 // 订阅模式：检查缓存用量未超过限额（Group限额从参数传入）
 // platform 为请求的目标平台（如 "anthropic"），传空串 "" 时跳过 user × platform quota 检查。
 func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user *User, apiKey *APIKey, group *Group, subscription *UserSubscription, platform string) error {
-	return s.checkBillingEligibility(ctx, user, apiKey, group, subscription, platform, true)
-}
-
-// RecheckBillingEligibility validates a held request against fresh account and
-// group state without counting the same client request against RPM again.
-func (s *BillingCacheService) RecheckBillingEligibility(ctx context.Context, user *User, apiKey *APIKey, group *Group, subscription *UserSubscription, platform string) error {
-	return s.checkBillingEligibility(ctx, user, apiKey, group, subscription, platform, false)
-}
-
-func (s *BillingCacheService) checkBillingEligibility(
-	ctx context.Context,
-	user *User,
-	apiKey *APIKey,
-	group *Group,
-	subscription *UserSubscription,
-	platform string,
-	countRPM bool,
-) error {
 	// 简易模式：跳过所有计费检查
 	if s.cfg.RunMode == config.RunModeSimple {
 		return nil
@@ -787,10 +769,8 @@ func (s *BillingCacheService) checkBillingEligibility(
 	}
 
 	// RPM 限流：级联回落（Override → Group → User），放在最后以避免为注定失败的请求增加计数。
-	if countRPM {
-		if err := s.checkRPM(ctx, user, group); err != nil {
-			return err
-		}
+	if err := s.checkRPM(ctx, user, group); err != nil {
+		return err
 	}
 
 	return nil

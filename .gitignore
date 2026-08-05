@@ -123,9 +123,6 @@ CLAUDE.md
 scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
-!local-native/
-!local-native/**
-# local-native/.gitignore still excludes secrets, build, logs, runtime data
 .code-review-state
 #openspec/
 code-reviews/

@@ -59,17 +59,10 @@ func TestTempUnscheduleRetryableErrorSkipsRequestScopedTransient(t *testing.T) {
 func TestStreamFailedEventCapacityShedRetriesOnSameAccount(t *testing.T) {
 	nonPool := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 
-	cases := map[string][]byte{
-		"server_is_overloaded": []byte(`{"type":"response.failed","response":{"error":{"code":"server_is_overloaded"}}}`),
-		"slow_down":            []byte(`{"type":"response.failed","response":{"error":{"code":"slow_down"}}}`),
-		"model_capacity":       []byte(`{"type":"response.failed","error":{"message":"Selected model is at capacity. Please try a different model."}}`),
-		"server_overloaded":    []byte(`{"type":"response.failed","error":{"message":"Our servers are currently overloaded. Please try again later."}}`),
-	}
-	for name, payload := range cases {
-		t.Run(name, func(t *testing.T) {
-			require.True(t, isOpenAIUpstreamCapacityShedEvent(payload))
-			require.True(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, payload, extractOpenAISSEErrorMessage(payload)))
-		})
+	for _, code := range []string{"server_is_overloaded", "slow_down"} {
+		payload := []byte(`{"type":"response.failed","response":{"error":{"code":"` + code + `"}}}`)
+		require.True(t, isOpenAIUpstreamCapacityShedEvent(payload), code)
+		require.True(t, openAIStreamFailedEventRetryableOnSameAccount(nonPool, payload, "overloaded"), code)
 	}
 
 	// 非降载的 failed 事件在非池模式下仍不做同账号重试，避免放大改动面。

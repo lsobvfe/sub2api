@@ -10,8 +10,6 @@ const {
   getWebSearchEmulationConfig,
   updateWebSearchEmulationConfig,
   getAdminApiKey,
-  getOpenAIStreamHoldSettings,
-  updateOpenAIStreamHoldSettings,
   getOverloadCooldownSettings,
   getRateLimit429CooldownSettings,
   updateRateLimit429CooldownSettings,
@@ -40,8 +38,6 @@ const {
   getWebSearchEmulationConfig: vi.fn(),
   updateWebSearchEmulationConfig: vi.fn(),
   getAdminApiKey: vi.fn(),
-  getOpenAIStreamHoldSettings: vi.fn(),
-  updateOpenAIStreamHoldSettings: vi.fn(),
   getOverloadCooldownSettings: vi.fn(),
   getRateLimit429CooldownSettings: vi.fn(),
   updateRateLimit429CooldownSettings: vi.fn(),
@@ -89,8 +85,6 @@ vi.mock("@/api", () => ({
       getWebSearchEmulationConfig,
       updateWebSearchEmulationConfig,
       getAdminApiKey,
-      getOpenAIStreamHoldSettings,
-      updateOpenAIStreamHoldSettings,
       getOverloadCooldownSettings,
       getRateLimit429CooldownSettings,
       updateRateLimit429CooldownSettings,
@@ -204,11 +198,6 @@ vi.mock("vue-i18n", async () => {
     "admin.settings.openaiExperimentalScheduler.lowRatePriorityDescription": "开启后优先选择计费倍率较低的账号；倍率相同时，再比较账号优先级和当前负载等。启用实验调度策略后，此开关不生效。",
     "admin.settings.openaiExperimentalScheduler.oauthRateTitle": "OAuth 调度参考倍率",
     "admin.settings.openaiExperimentalScheduler.oauthRatePriorityDescription": "同一分组同时包含 API Key 和 OAuth 账号时，OAuth 账号按此倍率与已探测的 API Key 计费倍率一起排序。",
-    "admin.settings.openaiStreamHold.title": "OpenAI 流式持续等待",
-    "admin.settings.openaiStreamHold.enabled": "启用流式持续等待",
-    "admin.settings.openaiStreamHold.enabledHint": "切换后立即生效。",
-    "admin.settings.openaiStreamHold.enabledSuccess": "OpenAI 流式持续等待已启用",
-    "admin.settings.openaiStreamHold.disabledSuccess": "OpenAI 流式持续等待已停用",
     "admin.settings.openaiExperimentalScheduler.oauthRateWeightedDescription": "同一分组同时包含 API Key 和 OAuth 账号时，计算“计费倍率”得分时，OAuth 账号按此倍率参与计算。",
     "admin.settings.openaiExperimentalScheduler.stickyWeightedTitle": "粘性加权",
     "admin.settings.openaiExperimentalScheduler.stickyWeightedDescription": "开启后 previous_response_id 和 session_hash 粘性进入高级调度打分；关闭时仍按旧逻辑硬命中粘性账号。",
@@ -610,8 +599,6 @@ describe("admin SettingsView payment visible method controls", () => {
     getWebSearchEmulationConfig.mockReset();
     updateWebSearchEmulationConfig.mockReset();
     getAdminApiKey.mockReset();
-    getOpenAIStreamHoldSettings.mockReset();
-    updateOpenAIStreamHoldSettings.mockReset();
     getOverloadCooldownSettings.mockReset();
     getRateLimit429CooldownSettings.mockReset();
     updateRateLimit429CooldownSettings.mockReset();
@@ -651,8 +638,6 @@ describe("admin SettingsView payment visible method controls", () => {
       exists: false,
       masked_key: "",
     });
-    getOpenAIStreamHoldSettings.mockResolvedValue({ enabled: true });
-    updateOpenAIStreamHoldSettings.mockImplementation(async (payload) => payload);
     getOverloadCooldownSettings.mockResolvedValue({
       enabled: true,
       cooldown_minutes: 10,
@@ -1250,28 +1235,6 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(showSuccess).toHaveBeenCalledWith("上游倍率自动探测设置已保存");
   });
 
-  it("loads and immediately toggles OpenAI streaming hold", async () => {
-    const wrapper = mountView();
-
-    await flushPromises();
-    await openGatewayTab(wrapper);
-
-    const card = wrapper.get('[data-testid="openai-stream-hold-settings"]');
-    const toggle = card.get('[data-testid="openai-stream-hold-enabled"]');
-    expect(card.isVisible()).toBe(true);
-    expect(card.text()).toContain("OpenAI 流式持续等待");
-    expect((toggle.element as HTMLInputElement).checked).toBe(true);
-
-    await toggle.setValue(false);
-    await flushPromises();
-
-    expect(updateOpenAIStreamHoldSettings).toHaveBeenCalledWith({
-      enabled: false,
-    });
-    expect((toggle.element as HTMLInputElement).checked).toBe(false);
-    expect(showSuccess).toHaveBeenCalledWith("OpenAI 流式持续等待已停用");
-  });
-
   it("loads fail-safe-off Ollama Cloud usage refresh settings and saves an explicit opt-in", async () => {
     const wrapper = mountView();
 
@@ -1449,8 +1412,6 @@ describe("admin SettingsView wechat connect controls", () => {
     getWebSearchEmulationConfig.mockReset();
     updateWebSearchEmulationConfig.mockReset();
     getAdminApiKey.mockReset();
-    getOpenAIStreamHoldSettings.mockReset();
-    updateOpenAIStreamHoldSettings.mockReset();
     getOverloadCooldownSettings.mockReset();
     getRateLimit429CooldownSettings.mockReset();
     updateRateLimit429CooldownSettings.mockReset();
@@ -1489,8 +1450,6 @@ describe("admin SettingsView wechat connect controls", () => {
       exists: false,
       masked_key: "",
     });
-    getOpenAIStreamHoldSettings.mockResolvedValue({ enabled: true });
-    updateOpenAIStreamHoldSettings.mockImplementation(async (payload) => payload);
     getOverloadCooldownSettings.mockResolvedValue({
       enabled: true,
       cooldown_minutes: 10,
@@ -1699,8 +1658,6 @@ describe("admin SettingsView platform quota matrix", () => {
     getWebSearchEmulationConfig.mockReset();
     updateWebSearchEmulationConfig.mockReset();
     getAdminApiKey.mockReset();
-    getOpenAIStreamHoldSettings.mockReset();
-    updateOpenAIStreamHoldSettings.mockReset();
     getOverloadCooldownSettings.mockReset();
     getRateLimit429CooldownSettings.mockReset();
     updateRateLimit429CooldownSettings.mockReset();
@@ -1727,8 +1684,6 @@ describe("admin SettingsView platform quota matrix", () => {
     getWebSearchEmulationConfig.mockResolvedValue({ enabled: false, providers: [] });
     updateWebSearchEmulationConfig.mockResolvedValue({ enabled: false, providers: [] });
     getAdminApiKey.mockResolvedValue({ exists: false, masked_key: "" });
-    getOpenAIStreamHoldSettings.mockResolvedValue({ enabled: true });
-    updateOpenAIStreamHoldSettings.mockImplementation(async (payload) => payload);
     getOverloadCooldownSettings.mockResolvedValue({});
     getRateLimit429CooldownSettings.mockResolvedValue({});
     updateRateLimit429CooldownSettings.mockResolvedValue({});

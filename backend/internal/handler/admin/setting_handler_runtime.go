@@ -10,31 +10,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type UpdateOpenAIStreamHoldSettingsRequest struct {
-	Enabled bool `json:"enabled"`
-}
-
-// GetOpenAIStreamHoldSettings returns the effective in-process runtime switch.
-func (h *SettingHandler) GetOpenAIStreamHoldSettings(c *gin.Context) {
-	response.Success(c, h.settingService.GetOpenAIStreamHoldSettings())
-}
-
-// UpdateOpenAIStreamHoldSettings persists and applies the runtime switch.
-func (h *SettingHandler) UpdateOpenAIStreamHoldSettings(c *gin.Context) {
-	var req UpdateOpenAIStreamHoldSettingsRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.BadRequest(c, "Invalid request: "+err.Error())
-		return
-	}
-
-	settings := service.OpenAIStreamHoldSettings{Enabled: req.Enabled}
-	if err := h.settingService.SetOpenAIStreamHoldSettings(c.Request.Context(), settings); err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	response.Success(c, h.settingService.GetOpenAIStreamHoldSettings())
-}
-
 // GetAdminAPIKey 获取管理员 API Key 状态
 // GET /api/v1/admin/settings/admin-api-key
 func (h *SettingHandler) GetAdminAPIKey(c *gin.Context) {

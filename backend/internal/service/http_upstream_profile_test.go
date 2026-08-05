@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 func TestWithHTTPUpstreamProfile_DefaultKeepsContext(t *testing.T) {
@@ -11,13 +10,6 @@ func TestWithHTTPUpstreamProfile_DefaultKeepsContext(t *testing.T) {
 	got := WithHTTPUpstreamProfile(ctx, HTTPUpstreamProfileDefault)
 	if got != ctx {
 		t.Fatal("default profile should not wrap context")
-	}
-}
-
-func TestWithHTTPUpstreamResponseHeaderTimeout(t *testing.T) {
-	ctx := WithHTTPUpstreamResponseHeaderTimeout(context.Background(), 12*time.Second)
-	if timeout := HTTPUpstreamResponseHeaderTimeoutFromContext(ctx); timeout != 12*time.Second {
-		t.Fatalf("response header timeout = %s, want 12s", timeout)
 	}
 }
 

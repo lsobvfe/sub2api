@@ -753,37 +753,6 @@ export default {
         errorAccounts: 'Errors {count}',
         loadFailed: 'Failed to load concurrency data'
       },
-      streamHolds: {
-        title: 'Active Stream Holds',
-        enabled: 'Persistent waiting enabled',
-        disabled: 'Persistent waiting disabled',
-        active: 'Active requests',
-        oldest: 'Oldest hold',
-        holding: 'Holding',
-        retrying: 'Upstream attempts',
-        elapsed: 'Elapsed',
-        state: 'State / reason',
-        request: 'Request / model',
-        routing: 'Platform / account',
-        retry: 'Retry',
-        updated: 'Updated',
-        cycle: 'Cycle {count}',
-        upstreamAttempt: 'Awaiting upstream',
-        empty: 'No streaming requests are currently held',
-        loadFailed: 'Failed to load active stream holds',
-        phases: {
-          holding: 'Holding',
-          retrying: 'Retrying'
-        },
-        reasons: {
-          no_available_account: 'No account available',
-          user_concurrency: 'User concurrency full',
-          account_concurrency: 'Account concurrency full',
-          upstream_retryable: 'Temporary upstream error',
-          upstream_rate_limit: 'Upstream rate limit',
-          upstream_unavailable: 'Upstream unavailable'
-        }
-      },
       realtime: {
         title: 'Realtime',
         connected: 'Realtime connected',

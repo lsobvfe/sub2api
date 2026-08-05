@@ -388,8 +388,11 @@ func assertOpenAINativeLargeOpenEventTimesOutWithoutLeak(t *testing.T, line stri
 	require.True(t, failoverErr.SafeToFailoverAfterWrite)
 	require.NotContains(t, rec.Body.String(), "data:", "attempt JSON must remain private before the SSE boundary")
 	require.NotContains(t, rec.Body.String(), `"type"`, "attempt JSON must remain private before the SSE boundary")
-	require.Empty(t, rec.Body.String(), "guarded failover must not start the downstream response")
-	require.False(t, c.Writer.Written())
+	for _, outputLine := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
+		if outputLine != "" {
+			require.True(t, strings.HasPrefix(outputLine, ":"), "only keepalive comments may precede failover: %q", outputLine)
+		}
+	}
 	require.Empty(t, rec.Header().Values("X-Request-Id"))
 	require.Empty(t, rec.Header().Values("X-Ratelimit-Remaining-Requests"))
 	select {
@@ -564,7 +567,7 @@ func TestOpenAINativeFirstOutputTimeoutDisabledPreservesKeepaliveFlush(t *testin
 	require.Contains(t, rec.Body.String(), "response.in_progress")
 }
 
-func TestOpenAINativeFirstOutputFailoverPublishesOnlySuccessfulAttempt(t *testing.T) {
+func TestOpenAINativeFirstOutputFailoverKeepsAttemptHeadersPrivateAfterKeepaliveCommit(t *testing.T) {
 	cfg := &config.Config{Gateway: config.GatewayConfig{
 		OpenAIFirstOutputTimeoutSeconds: 2,
 		StreamKeepaliveInterval:         1,
@@ -602,8 +605,8 @@ func TestOpenAINativeFirstOutputFailoverPublishesOnlySuccessfulAttempt(t *testin
 	_, firstErr := svc.handleStreamingResponse(c.Request.Context(), firstResp, c, &Account{ID: 1, Platform: PlatformOpenAI}, time.Now(), "model", "model")
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, firstErr, &failoverErr)
-	require.Empty(t, rec.Body.String(), "first attempt must not start SSE before semantic output")
-	require.False(t, c.Writer.Written())
+	require.Contains(t, rec.Body.String(), ":\n\n", "first attempt should have committed only a stable keepalive")
+	require.NotContains(t, rec.Body.String(), "resp_first")
 
 	secondResp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -625,10 +628,10 @@ func TestOpenAINativeFirstOutputFailoverPublishesOnlySuccessfulAttempt(t *testin
 	require.NotNil(t, result)
 	require.Contains(t, rec.Body.String(), "resp_second")
 	wireHeaders := rec.Result().Header
-	require.Equal(t, []string{"request-second"}, wireHeaders.Values("X-Request-Id"))
-	require.Equal(t, []string{"99"}, wireHeaders.Values("X-Ratelimit-Remaining-Requests"))
-	require.Equal(t, []string{"request-second"}, rec.Header().Values("X-Request-Id"))
-	require.Equal(t, []string{"99"}, rec.Header().Values("X-Ratelimit-Remaining-Requests"))
+	require.Empty(t, wireHeaders.Values("X-Request-Id"))
+	require.Empty(t, wireHeaders.Values("X-Ratelimit-Remaining-Requests"))
+	require.Empty(t, rec.Header().Values("X-Request-Id"))
+	require.Empty(t, rec.Header().Values("X-Ratelimit-Remaining-Requests"))
 	select {
 	case <-firstWriterDone:
 	case <-time.After(time.Second):

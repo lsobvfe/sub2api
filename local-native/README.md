@@ -1,55 +1,80 @@
 # local-native
 
-本机以源码二进制方式跑 Sub2API（非 Docker）。
+本机以两个独立进程运行：
 
-## 布局
+```text
+client :18081
+  -> stream-hold-proxy (独立 Go module)
+  -> official Sub2API :18082
+```
+
+Sub2API 的后端、前端、配置、Wire 和测试保持 `upstream/main` 原样。流式等待功能仅存在于：
+
+```text
+local-native/extensions/stream-hold-proxy/
+```
+
+该模块不 import Sub2API，不读取其数据库、账号、分组或运行时设置。每次重试都是一条新的普通 HTTP 请求，因此 API key 换分组、账号池变化和 Sub2API 重启都会在下一次请求中自然生效。
+
+## 流式语义
+
+代理仅接管 `STREAM_HOLD_PATHS` 中且 JSON body 为 `"stream": true` 的请求：
+
+1. 完整复制客户端请求并发给 Sub2API。
+2. 将该次 SSE 写入临时 spool，同时解析终止事件。
+3. 只有看到 `response.completed`（或 `[DONE]`）才向客户端回放。
+4. HTTP 错误、传输错误、`response.failed`、`response.incomplete`、无终止 EOF、流空闲和单次尝试超时全部丢弃并重试。
+5. 总等待时间不限；客户端取消后立即停止。
+6. 等待期间向客户端发送 SSE comment keepalive，避免客户端 idle timeout。
+
+这意味着失败尝试即使已经生成部分 token，也不会把半截内容或错误泄露给客户端。
+
+## 运行文件
 
 | 路径 | 说明 | Git |
 |------|------|-----|
-| `scripts/update-and-restart.sh` | 提交 → 拉上游 → 构建（embed）→ 重启唯一系统服务 | 跟踪 |
-| `runtime/sub2api.env.example` | 环境变量模板 | 跟踪 |
-| `runtime/sub2api.env` | 真实密钥 | **忽略** |
-| `runtime/data/` | 数据与运行日志 | **忽略** |
-| `build/` | 编译产物 | **忽略** |
-| `logs/` | 进程 stdout 日志 | **忽略** |
+| `extensions/stream-hold-proxy/` | 独立代理和独立测试 | 跟踪 |
+| `systemd/` | 两个系统服务的唯一模板 | 跟踪 |
+| `scripts/update-and-restart.sh` | 同步、构建、部署和验收 | 跟踪 |
+| `runtime/sub2api.env.example` | Sub2API 内部服务配置模板 | 跟踪 |
+| `runtime/stream-hold-proxy.env.example` | 代理配置模板 | 跟踪 |
+| `runtime/*.env` | 本机实际配置 | 忽略 |
+| `runtime/work/` | 状态、spool、Sub2API 工作目录 | 忽略 |
+| `build/` | 两个二进制 | 忽略 |
 
-## 首次
+## 开关
 
-```bash
-cp runtime/sub2api.env.example runtime/sub2api.env
-# 编辑 sub2api.env
-./scripts/update-and-restart.sh
+本机控制页：
+
+```text
+http://localhost:18081/_stream-hold/
 ```
 
-## 分支约定
-
-- 始终在 **`main`** 上工作，并 `git branch -u upstream/main`
-- 本地自定义功能直接 commit 在 `main` 上（不要再开 `local/*` 分支）
-- 与 monorepo 的 `scripts/pull_all_upstreams.sh` 同一模型：先 commit 本地，再 merge 上游；冲突停手手动解决
+开关由代理自身持久化，不调用 Sub2API。停用后，新请求透明转发；已经被接管的请求继续完成，避免切换动作主动断开现有客户端。
 
 ## 更新
 
-VS Code task：**`sub2api: update and restart`**
+先提交工作树，再运行：
 
 ```bash
-./scripts/update-and-restart.sh
+./local-native/scripts/update-and-restart.sh
 ```
+
+VS Code task：`sub2api: update and restart`
 
 脚本会：
 
-1. **`git add -A` + commit**：提交**整个仓库**当前可跟踪变更（不是只提交 local-native；密钥/build 仍由 gitignore 排除）
-2. `git fetch/merge upstream/main`（当前分支，默认 main）
-3. 构建前端 + 后端（**`-tags embed`**）
-4. 原子替换二进制，仅通过 `sub2api-source.service` 重启
-5. 校验 systemd MainPID 是 `18081` 的唯一监听者，并校验 `/` 返回 HTML
+1. 要求工作树干净，不再自动生成 snapshot commit。
+2. fetch/merge `upstream/main`。
+3. 使用固定的 pnpm 9 工具链非交互安装和构建前端。
+4. 构建官方 Sub2API embed 二进制。
+5. 构建独立代理并安装两个 systemd unit。
+6. 重启内部 Sub2API；代理二进制未变化时不重启代理，因此已有客户端流会在 Sub2API 更新期间继续 hold。
+7. 验证两个端口的唯一监听者、内部/外部 health 和前端 HTML。
 
-## 启动拓扑
+代理自身测试：
 
-- 唯一运行入口：系统级 `sub2api-source.service`
-- 禁止使用 `nohup`、PID 文件或用户级 systemd 单元启动第二个实例
-- `sub2api-native.service` 是已废弃的旧用户级单元，必须保持删除并被 mask
-- 开机自启动由 `sudo systemctl enable sub2api-source.service` 管理
-
-必须用 **`-tags embed`** 构建，否则只有 API、`/` 全站 SPA 会 `404 page not found`。
-
-仅拉代码、不构建重启时，可跑 monorepo 根目录的 `scripts/pull_all_upstreams.sh`（会对本仓 auto-commit + merge `upstream/main`）。
+```bash
+cd local-native/extensions/stream-hold-proxy
+go test ./...
+```

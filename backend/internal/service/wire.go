@@ -681,9 +681,6 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	if err := svc.LoadForwardedClientIPSettings(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: load forwarded client IP settings failed: %v", err)
 	}
-	if err := svc.LoadOpenAIStreamHoldRuntime(context.Background()); err != nil {
-		logger.LegacyPrintf("service.setting", "Warning: load OpenAI stream hold runtime failed: %v", err)
-	}
 	if err := svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: migrate openai allow Claude Code Codex plugin setting failed: %v", err)
 	}
@@ -788,7 +785,6 @@ var ProviderSet = wire.NewSet(
 	ProvideUpstreamBillingProbeService,
 	ProvideOllamaCloudUsageService,
 	ProvideSettingService,
-	NewOpenAIStreamHoldTracker,
 	NewDataManagementService,
 	ProvideBackupService,
 	ProvideOpsSystemLogSink,

@@ -121,7 +121,15 @@ func isOpenAITransientProcessingError(upstreamStatusCode int, upstreamMsg string
 		return false
 	}
 
-	if isOpenAIUpstreamCapacityShedError(upstreamMsg, upstreamBody) {
+	hasOpenAIServerOverloadedCode := func(payload []byte) bool {
+		code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "error.code").String()))
+		if code == "" {
+			code = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "response.error.code").String()))
+		}
+		return code == "server_is_overloaded" || code == "slow_down"
+	}
+
+	if len(upstreamBody) > 0 && hasOpenAIServerOverloadedCode(upstreamBody) {
 		return true
 	}
 	if upstreamStatusCode != http.StatusBadRequest {
@@ -134,6 +142,9 @@ func isOpenAITransientProcessingError(upstreamStatusCode int, upstreamMsg string
 			return false
 		}
 		if strings.Contains(lower, "an error occurred while processing your request") {
+			return true
+		}
+		if strings.Contains(lower, "selected model is at capacity") {
 			return true
 		}
 		return strings.Contains(lower, "you can retry your request") &&
@@ -151,40 +162,6 @@ func isOpenAITransientProcessingError(upstreamStatusCode int, upstreamMsg string
 		return true
 	}
 	return match(string(upstreamBody))
-}
-
-func openAIUpstreamErrorCode(payload []byte) string {
-	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "response.error.code").String()))
-	if code == "" {
-		code = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "error.code").String()))
-	}
-	return code
-}
-
-func isOpenAIUpstreamCapacityShedError(upstreamMsg string, upstreamBody []byte) bool {
-	switch openAIUpstreamErrorCode(upstreamBody) {
-	case "server_is_overloaded", "slow_down":
-		return true
-	}
-
-	match := func(text string) bool {
-		lower := strings.ToLower(strings.TrimSpace(text))
-		if lower == "" {
-			return false
-		}
-		return strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "servers are currently overloaded") ||
-			strings.Contains(lower, "server is currently overloaded")
-	}
-	if match(upstreamMsg) {
-		return true
-	}
-	for _, path := range []string{"response.error.message", "error.message", "message"} {
-		if match(gjson.GetBytes(upstreamBody, path).String()) {
-			return true
-		}
-	}
-	return false
 }
 
 func isOpenAIContextWindowError(upstreamMsg string, upstreamBody []byte) bool {
@@ -258,10 +235,7 @@ func (s *OpenAIGatewayService) shouldFailoverOpenAIUpstreamResponse(statusCode i
 // after all account-specific request body limit failovers are exhausted.
 const OpenAIRequestBodyTooLargeClientMessage = "Request payload is too large"
 
-const (
-	openAIRequestBodyTooLargeReason  = GatewayFailureReason("openai_request_body_too_large")
-	openAIUpstreamCapacityShedReason = GatewayFailureReason("openai_upstream_capacity_shed")
-)
+const openAIRequestBodyTooLargeReason = GatewayFailureReason("openai_request_body_too_large")
 
 func isOpenAIRequestBodyTooLargeError(statusCode int, upstreamMsg string, upstreamBody []byte) bool {
 	return statusCode == http.StatusRequestEntityTooLarge && !isOpenAIContextWindowError(upstreamMsg, upstreamBody)
@@ -279,12 +253,6 @@ func newOpenAIUpstreamFailoverError(
 		ResponseBody:           responseBody,
 		ResponseHeaders:        responseHeaders.Clone(),
 		RetryableOnSameAccount: retryableOnSameAccount,
-	}
-	if isOpenAIUpstreamCapacityShedError(upstreamMsg, responseBody) {
-		failoverErr.RetryableOnSameAccount = true
-		failoverErr.RequestScopedTransient = true
-		failoverErr.Scope = GatewayFailureScopeRequest
-		failoverErr.Reason = openAIUpstreamCapacityShedReason
 	}
 	if isOpenAIRequestBodyTooLargeError(statusCode, upstreamMsg, responseBody) {
 		failoverErr.RetryableOnSameAccount = false

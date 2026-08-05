@@ -1,16 +1,6 @@
 #!/usr/bin/env bash
-# 1) git 提交**整个仓库**当前可跟踪变更（gitignore 排除密钥/构建物）
-# 2) 拉取并合并 upstream（校验 remote tip，报告 ahead/behind）
-# 3) 构建前端 + 后端（必须 -tags embed），二进制版本必须等于源码 VERSION
-# 4) 原子替换二进制，通过唯一的 systemd 服务重启并校验
-#
-# VS Code task: "sub2api: update and restart"
-#
-# "Already up to date" from git merge only means every upstream commit is
-# already reachable from HEAD. Local commits may still be ahead, and the
-# running binary may still be stale — this script always rebuilds + restarts
-# and prints source/binary/running version so that is not mistaken for "live
-# process is current".
+# Sync official Sub2API, build the untouched upstream application plus the
+# independent stream-hold proxy, then deploy the two-service topology.
 
 set -euo pipefail
 
@@ -19,13 +9,20 @@ LOCAL_NATIVE="$ROOT/local-native"
 BIN_DIR="$LOCAL_NATIVE/build"
 RUNTIME="$LOCAL_NATIVE/runtime"
 WORK="$RUNTIME/work"
-ENV_FILE="$RUNTIME/sub2api.env"
-OUT_BIN="$BIN_DIR/sub2api-source"
-SERVICE_NAME="${SUB2API_SYSTEMD_SERVICE:-sub2api-source.service}"
+SUB2API_ENV="$RUNTIME/sub2api.env"
+PROXY_ENV="$RUNTIME/stream-hold-proxy.env"
+SUB2API_BIN="$BIN_DIR/sub2api-source"
+PROXY_BIN="$BIN_DIR/sub2api-stream-hold-proxy"
+PROXY_ROOT="$LOCAL_NATIVE/extensions/stream-hold-proxy"
+SUB2API_UNIT="$LOCAL_NATIVE/systemd/sub2api-source.service"
+PROXY_UNIT="$LOCAL_NATIVE/systemd/sub2api-stream-hold-proxy.service"
+SUB2API_SERVICE="${SUB2API_SYSTEMD_SERVICE:-sub2api-source.service}"
+PROXY_SERVICE="${STREAM_HOLD_SYSTEMD_SERVICE:-sub2api-stream-hold-proxy.service}"
 VERSION_FILE="$ROOT/backend/cmd/server/VERSION"
 UPSTREAM_REMOTE="${SUB2API_UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_BRANCH="${SUB2API_UPSTREAM_BRANCH:-main}"
 FETCH_ATTEMPTS="${SUB2API_FETCH_ATTEMPTS:-5}"
+PNPM_VERSION="${SUB2API_PNPM_VERSION:-9.15.9}"
 
 log() { printf '[sub2api] %s\n' "$*"; }
 die() { printf '[sub2api] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +32,6 @@ read_source_version() {
   tr -d '[:space:]' <"$VERSION_FILE"
 }
 
-# Binary -version prints one line then exits (see backend/cmd/server/main.go).
 binary_version() {
   local bin="$1"
   [[ -x "$bin" ]] || return 1
@@ -48,6 +44,21 @@ binary_version() {
   return 1
 }
 
+read_env_var() {
+  local file="$1"
+  local key="$2"
+  (
+    set -a
+    # shellcheck disable=SC1090
+    . "$file"
+    printf '%s' "${!key:-}"
+  )
+}
+
+run_pnpm() {
+  CI=true npx -y "pnpm@${PNPM_VERSION}" "$@"
+}
+
 fetch_upstream() {
   local attempt delay
   for attempt in $(seq 1 "$FETCH_ATTEMPTS"); do
@@ -55,223 +66,218 @@ fetch_upstream() {
       return 0
     fi
     delay=$((attempt * 2))
-    log "fetch $UPSTREAM_REMOTE failed (attempt ${attempt}/${FETCH_ATTEMPTS}); retry in ${delay}s"
+    log "fetch failed (attempt ${attempt}/${FETCH_ATTEMPTS}); retry in ${delay}s"
     sleep "$delay"
   done
   return 1
 }
 
-# Confirm the remote-tracking ref matches the live remote tip. A successful
-# HTTP handshake that left refs stale would otherwise make merge lie.
 assert_tracking_matches_remote_tip() {
   local merge_ref="$1"
   local remote_tip tracking_tip
   remote_tip="$(git ls-remote "$UPSTREAM_REMOTE" "refs/heads/${UPSTREAM_BRANCH}" | awk 'NR==1 {print $1}')"
-  [[ -n "$remote_tip" ]] || die "git ls-remote $UPSTREAM_REMOTE refs/heads/${UPSTREAM_BRANCH} returned empty"
+  [[ -n "$remote_tip" ]] || die "remote tip is empty for ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"
   tracking_tip="$(git rev-parse --verify "$merge_ref")"
-  if [[ "$remote_tip" != "$tracking_tip" ]]; then
-    die "after fetch, $merge_ref is $tracking_tip but remote tip is $remote_tip — fetch did not update tracking ref"
-  fi
+  [[ "$remote_tip" == "$tracking_tip" ]] ||
+    die "$merge_ref is $tracking_tip but remote tip is $remote_tip"
 }
 
-[[ -f "$ENV_FILE" ]] || die "missing $ENV_FILE (copy from runtime/sub2api.env.example)"
-command -v go >/dev/null || die "go not found"
-command -v pnpm >/dev/null || die "pnpm not found"
-command -v git >/dev/null || die "git not found"
-command -v curl >/dev/null || die "curl not found"
-command -v ss >/dev/null || die "ss not found"
-command -v grep >/dev/null || die "grep not found"
-command -v systemctl >/dev/null || die "systemctl not found"
-command -v sudo >/dev/null || die "sudo not found"
+wait_http() {
+  local url="$1"
+  local service="$2"
+  local attempts="${3:-60}"
+  local code
+  for _ in $(seq 1 "$attempts"); do
+    code="$(curl -sS -m 1 -o /dev/null -w '%{http_code}' "$url" || true)"
+    if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+      return 0
+    fi
+    if ! systemctl is-active --quiet "$service"; then
+      sudo journalctl -u "$service" -n 80 --no-pager >&2 || true
+      return 1
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+listener_pids() {
+  local port="$1"
+  ss -ltnp "sport = :${port}" 2>/dev/null |
+    grep -oE 'pid=[0-9]+' |
+    cut -d= -f2 |
+    sort -u || true
+}
+
+proxy_source_version() {
+  find "$PROXY_ROOT" -type f \
+    \( -name '*.go' ! -name '*_test.go' -o -name '*.html' -o -name 'go.mod' \) \
+    -print0 |
+    sort -z |
+    xargs -0 sha256sum |
+    sha256sum |
+    cut -c1-12
+}
+
+for command in go npx git curl ss grep systemctl sudo strings sha256sum find sort xargs cmp; do
+  command -v "$command" >/dev/null || die "$command not found"
+done
+[[ -f "$SUB2API_ENV" ]] || die "missing $SUB2API_ENV"
+[[ -f "$PROXY_ENV" ]] || die "missing $PROXY_ENV"
+[[ -f "$SUB2API_UNIT" ]] || die "missing $SUB2API_UNIT"
+[[ -f "$PROXY_UNIT" ]] || die "missing $PROXY_UNIT"
 
 cd "$ROOT"
-git rev-parse --is-inside-work-tree >/dev/null || die "not a git repo: $ROOT"
+git rev-parse --is-inside-work-tree >/dev/null || die "not a git repository: $ROOT"
+if [[ -n "$(git status --porcelain)" ]]; then
+  git status --short >&2
+  die "worktree is dirty; commit the intended changes before update-and-restart"
+fi
 
 mkdir -p "$BIN_DIR" "$WORK"
 
+SUB2API_HOST="$(read_env_var "$SUB2API_ENV" SERVER_HOST)"
+SUB2API_PORT="$(read_env_var "$SUB2API_ENV" SERVER_PORT)"
+PROXY_LISTEN="$(read_env_var "$PROXY_ENV" STREAM_HOLD_LISTEN_ADDR)"
+PROXY_UPSTREAM="$(read_env_var "$PROXY_ENV" STREAM_HOLD_UPSTREAM_URL)"
+[[ -n "$SUB2API_HOST" && -n "$SUB2API_PORT" ]] || die "SERVER_HOST and SERVER_PORT are required"
+[[ "$SUB2API_HOST" == "127.0.0.1" || "$SUB2API_HOST" == "::1" ]] ||
+  die "Sub2API must bind only to loopback behind the proxy (SERVER_HOST=$SUB2API_HOST)"
+[[ "$PROXY_LISTEN" =~ :([0-9]+)$ ]] || die "invalid STREAM_HOLD_LISTEN_ADDR=$PROXY_LISTEN"
+PUBLIC_PORT="${BASH_REMATCH[1]}"
+EXPECTED_UPSTREAM="http://${SUB2API_HOST}:${SUB2API_PORT}"
+[[ "$PROXY_UPSTREAM" == "$EXPECTED_UPSTREAM" ]] ||
+  die "STREAM_HOLD_UPSTREAM_URL must equal $EXPECTED_UPSTREAM"
+[[ "$PUBLIC_PORT" != "$SUB2API_PORT" ]] || die "proxy and Sub2API ports must differ"
+
 SOURCE_VERSION="$(read_source_version)"
-log "root=$ROOT source_version=${SOURCE_VERSION}"
+log "root=$ROOT source_version=$SOURCE_VERSION internal=:${SUB2API_PORT} public=:${PUBLIC_PORT}"
 
-# ── 1) Git: stage whole-repo trackable changes + commit ──────
-log "git status (pre-commit)"
-git status --short || true
-
-# Entire project; .gitignore excludes secrets/build/logs.
-# Never force-add ignored paths.
-git add -A
-
-if ! git diff --cached --quiet; then
-  # Hard refuse if secrets/dumps slipped past ignore rules
-  if git diff --cached --name-only | grep -E '(^|/)sub2api\.env$|(^|/)config\.yaml$|\.dump$|\.env$' >/dev/null; then
-    die "refusing to commit secrets/dumps; unstage and fix gitignore"
-  fi
-  BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-  MSG="chore: snapshot worktree before update-and-restart (${BRANCH})"
-  log "committing whole-repo trackable changes: $MSG"
-  git commit -m "$MSG"
-else
-  log "nothing to commit (clean trackable worktree)"
-fi
-
-# ── 2) Fetch + merge upstream ────────────────────────────────
-# Stay on the current branch (expected: main tracking upstream/main).
-# Same commit-then-merge model as scripts/pull_all_upstreams.sh — do not
-# create/switch local/* branches here.
-if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
-  die "remote '$UPSTREAM_REMOTE' missing — add it (https://github.com/Wei-Shaw/sub2api.git) before update"
-fi
-
-log "fetch $UPSTREAM_REMOTE"
+log "fetch upstream"
 fetch_upstream || die "fetch $UPSTREAM_REMOTE failed after ${FETCH_ATTEMPTS} attempts"
 
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
-  die "detached HEAD — checkout main (tracking $UPSTREAM_REMOTE/$UPSTREAM_BRANCH) first"
-fi
-
-# Prefer configured upstream tracking when it points at the same remote;
-# otherwise merge the explicit upstream branch (default: upstream/main).
+[[ "$CURRENT_BRANCH" != "HEAD" ]] || die "detached HEAD"
 TRACK_REF="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-if [[ -n "$TRACK_REF" && "$TRACK_REF" == "$UPSTREAM_REMOTE"/* ]]; then
+if [[ "$TRACK_REF" == "$UPSTREAM_REMOTE"/* ]]; then
   MERGE_REF="$TRACK_REF"
 else
   MERGE_REF="$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 fi
-
-git rev-parse --verify "$MERGE_REF" >/dev/null || die "missing ref $MERGE_REF after fetch"
+git rev-parse --verify "$MERGE_REF" >/dev/null || die "missing ref $MERGE_REF"
 assert_tracking_matches_remote_tip "$MERGE_REF"
 
-HEAD_SHA="$(git rev-parse HEAD)"
-UPSTREAM_SHA="$(git rev-parse "$MERGE_REF")"
 AHEAD="$(git rev-list --count "${MERGE_REF}..HEAD")"
 BEHIND="$(git rev-list --count "HEAD..${MERGE_REF}")"
-log "git HEAD=${HEAD_SHA:0:12} (${CURRENT_BRANCH})  ${MERGE_REF}=${UPSTREAM_SHA:0:12}  ahead=${AHEAD} behind=${BEHIND}"
-
-if [[ "$BEHIND" -eq 0 ]]; then
-  # git merge would print "Already up to date." — that only means upstream
-  # commits are already in HEAD. Local may still be ahead; binary may be stale.
-  log "no new upstream commits to merge (upstream tip already ancestor of HEAD)"
-  if [[ "$AHEAD" -gt 0 ]]; then
-    log "local branch is ahead of ${MERGE_REF} by ${AHEAD} commit(s) (local-native / local work)"
-  fi
-else
-  log "merge ${BEHIND} new commit(s) from $MERGE_REF into $CURRENT_BRANCH"
-  if ! git merge --no-edit "$MERGE_REF"; then
-    die "merge conflict with $MERGE_REF — resolve manually, then: git merge --continue && re-run"
-  fi
+log "git HEAD=$(git rev-parse --short=12 HEAD) ${MERGE_REF}=$(git rev-parse --short=12 "$MERGE_REF") ahead=${AHEAD} behind=${BEHIND}"
+if [[ "$BEHIND" -gt 0 ]]; then
+  log "merge ${BEHIND} upstream commit(s)"
+  git merge --no-edit "$MERGE_REF" ||
+    die "merge conflict with $MERGE_REF; resolve it, commit, then rerun"
 fi
+[[ -z "$(git status --porcelain)" ]] || die "worktree became dirty after upstream merge"
 
 SOURCE_VERSION="$(read_source_version)"
-log "source_version after merge: ${SOURCE_VERSION}  HEAD=$(git rev-parse --short HEAD)"
-
-# ── 3) Build frontend ────────────────────────────────────────
-log "building frontend…"
-if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
-  pnpm --dir "$ROOT/frontend" install
-fi
-
+log "building frontend with pnpm ${PNPM_VERSION}"
+run_pnpm --dir "$ROOT/frontend" --ignore-workspace install --frozen-lockfile
+run_pnpm --dir "$ROOT/frontend" --ignore-workspace run build
 WEB_DIST="$ROOT/backend/internal/web/dist"
-# Vite outDir is backend/internal/web/dist (see frontend/vite.config).
-# Do NOT delete WEB_DIST after build — that wiped the embed payload previously.
-pnpm --dir "$ROOT/frontend" run build
+[[ -f "$WEB_DIST/index.html" ]] || die "frontend dist missing $WEB_DIST/index.html"
 
-if [[ ! -f "$WEB_DIST/index.html" ]]; then
-  die "frontend dist missing index.html at $WEB_DIST (check frontend/vite.config outDir)"
-fi
-
-# ── 4) Build backend with -tags embed ────────────────────────
-log "building backend (-tags embed)…"
+log "building official Sub2API source (-tags embed)"
 VERSION="$(cd "$ROOT/backend" && ./scripts/resolve-version.sh)"
-[[ -n "$VERSION" ]] || die "resolve-version.sh returned empty"
-if [[ "$VERSION" != "$SOURCE_VERSION" ]]; then
-  die "resolve-version.sh => ${VERSION} but ${VERSION_FILE} => ${SOURCE_VERSION}"
-fi
-LDFLAGS="-s -w -X main.Version=${VERSION}"
-TMP_BIN="$BIN_DIR/sub2api-source.new"
+[[ "$VERSION" == "$SOURCE_VERSION" ]] ||
+  die "resolved version $VERSION does not match source version $SOURCE_VERSION"
+SUB2API_TMP="$BIN_DIR/sub2api-source.new"
 (
   cd "$ROOT/backend"
-  CGO_ENABLED=0 go build -tags embed -ldflags="$LDFLAGS" -trimpath -o "$TMP_BIN" ./cmd/server
+  GOTOOLCHAIN=auto CGO_ENABLED=0 go build \
+    -tags embed \
+    -trimpath \
+    -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o "$SUB2API_TMP" \
+    ./cmd/server
 )
-
-if strings "$TMP_BIN" | grep -F 'Frontend not embedded' >/dev/null; then
-  rm -f "$TMP_BIN"
-  die "binary lacks embed frontend (build without -tags embed)"
+if strings "$SUB2API_TMP" | grep -F 'Frontend not embedded' >/dev/null; then
+  rm -f "$SUB2API_TMP"
+  die "Sub2API binary does not contain the embedded frontend"
 fi
+BIN_VERSION="$(binary_version "$SUB2API_TMP")" || die "cannot read Sub2API binary version"
+[[ "$BIN_VERSION" == "$SOURCE_VERSION" ]] ||
+  die "Sub2API binary version $BIN_VERSION does not match source $SOURCE_VERSION"
 
-BIN_VERSION="$(binary_version "$TMP_BIN")" || die "cannot read version from new binary via -version"
-if [[ "$BIN_VERSION" != "$SOURCE_VERSION" ]]; then
-  rm -f "$TMP_BIN"
-  die "new binary version ${BIN_VERSION} != source ${SOURCE_VERSION}"
-fi
-log "built binary version=${BIN_VERSION}"
-
-# ── 5) Deploy and restart the single service owner ──────────
-# Load env first so SERVER_PORT matches the running instance.
-set -a
-# shellcheck disable=SC1090
-. "$ENV_FILE"
-set +a
-PORT="${SERVER_PORT:-18081}"
-
-systemctl cat "$SERVICE_NAME" >/dev/null 2>&1 ||
-  die "missing canonical system service: $SERVICE_NAME"
-systemctl is-enabled --quiet "$SERVICE_NAME" ||
-  die "canonical system service is not enabled: $SERVICE_NAME"
-
-# Refuse split ownership instead of killing arbitrary listeners. The only
-# accepted existing listener is the current MainPID of the canonical service.
-CURRENT_MAIN_PID="$(systemctl show "$SERVICE_NAME" -p MainPID --value)"
-mapfile -t CURRENT_LISTEN_PIDS < <(
-  ss -ltnp "sport = :${PORT}" 2>/dev/null |
-    grep -oE 'pid=[0-9]+' |
-    cut -d= -f2 |
-    sort -u || true
+PROXY_VERSION="$(proxy_source_version)"
+PROXY_TMP="$BIN_DIR/sub2api-stream-hold-proxy.new"
+log "building independent stream-hold proxy version=${PROXY_VERSION}"
+(
+  cd "$PROXY_ROOT"
+  CGO_ENABLED=0 go build \
+    -buildvcs=false \
+    -trimpath \
+    -ldflags="-s -w -buildid= -X main.version=${PROXY_VERSION}" \
+    -o "$PROXY_TMP" \
+    ./cmd/stream-hold-proxy
 )
-for p in "${CURRENT_LISTEN_PIDS[@]:-}"; do
-  [[ -z "${p:-}" ]] && continue
-  if [[ "$CURRENT_MAIN_PID" == "0" || "$p" != "$CURRENT_MAIN_PID" ]]; then
-    die "port ${PORT} is owned by pid ${p}, not ${SERVICE_NAME} MainPID ${CURRENT_MAIN_PID}; repair duplicate service ownership first"
-  fi
-done
+"$PROXY_TMP" -version | grep -F "$PROXY_VERSION" >/dev/null ||
+  die "cannot verify stream-hold proxy version"
 
-if [[ -f "$OUT_BIN" ]]; then
-  cp -af "$OUT_BIN" "$BIN_DIR/sub2api-source.previous"
-fi
-mv -f "$TMP_BIN" "$OUT_BIN"
-chmod +x "$OUT_BIN"
-
-log "restarting canonical service ${SERVICE_NAME} with ${OUT_BIN} (version ${BIN_VERSION})…"
-sudo systemctl restart "$SERVICE_NAME"
-
-for _ in $(seq 1 40); do
-  if curl -fsS -m 1 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true
-    die "$SERVICE_NAME exited during startup"
-  fi
-  sleep 0.5
-done
-
-ROOT_CODE=$(curl -sS -m 5 -o /tmp/sub2api-root.html -w "%{http_code}" "http://127.0.0.1:${PORT}/" || echo 000)
-HEALTH_CODE=$(curl -sS -m 5 -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/health" || echo 000)
-NEW_PID="$(systemctl show "$SERVICE_NAME" -p MainPID --value)"
-[[ "$NEW_PID" =~ ^[1-9][0-9]*$ ]] || die "invalid MainPID for $SERVICE_NAME: $NEW_PID"
-
-# Confirm the listener is owned exclusively by the canonical service.
-mapfile -t LISTEN_PIDS < <(ss -ltnp "sport = :${PORT}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
-if [[ ${#LISTEN_PIDS[@]} -ne 1 || "${LISTEN_PIDS[0]}" != "$NEW_PID" ]]; then
-  die "port ${PORT} listener pids=[${LISTEN_PIDS[*]:-}] must equal $SERVICE_NAME MainPID ${NEW_PID}"
+PROXY_CHANGED=1
+if [[ -x "$PROXY_BIN" ]] && cmp -s "$PROXY_BIN" "$PROXY_TMP"; then
+  PROXY_CHANGED=0
+  rm -f "$PROXY_TMP"
 fi
 
-log "health=${HEALTH_CODE} root=${ROOT_CODE} pid=${NEW_PID} version=${BIN_VERSION} source=${SOURCE_VERSION}"
-
-[[ "$HEALTH_CODE" == "200" ]] || die "health check failed"
-if [[ "$ROOT_CODE" != "200" ]] || ! grep -Ei '<!doctype html>|<title>' /tmp/sub2api-root.html >/dev/null; then
-  head -c 200 /tmp/sub2api-root.html >&2 || true
-  echo >&2
-  die "frontend not serving HTML (HTTP $ROOT_CODE) — embed build broken?"
+PROXY_UNIT_CHANGED=0
+if [[ ! -f "/etc/systemd/system/$PROXY_SERVICE" ]] ||
+  ! cmp -s "$PROXY_UNIT" "/etc/systemd/system/$PROXY_SERVICE"; then
+  PROXY_UNIT_CHANGED=1
 fi
 
-log "OK — upstream synced (ahead=${AHEAD} behind=0), built ${BIN_VERSION} with embed, restarted ${SERVICE_NAME} pid=${NEW_PID} on :${PORT}"
+if [[ -f "$SUB2API_BIN" ]]; then
+  cp -af "$SUB2API_BIN" "$BIN_DIR/sub2api-source.previous"
+fi
+mv -f "$SUB2API_TMP" "$SUB2API_BIN"
+chmod +x "$SUB2API_BIN"
+if [[ "$PROXY_CHANGED" -eq 1 ]]; then
+  mv -f "$PROXY_TMP" "$PROXY_BIN"
+  chmod +x "$PROXY_BIN"
+fi
+
+sudo install -m 0644 "$SUB2API_UNIT" "/etc/systemd/system/$SUB2API_SERVICE"
+sudo install -m 0644 "$PROXY_UNIT" "/etc/systemd/system/$PROXY_SERVICE"
+sudo systemctl daemon-reload
+sudo systemctl enable "$SUB2API_SERVICE" "$PROXY_SERVICE" >/dev/null
+
+log "restarting official Sub2API on internal port ${SUB2API_PORT}"
+sudo systemctl restart "$SUB2API_SERVICE"
+wait_http "http://127.0.0.1:${SUB2API_PORT}/health" "$SUB2API_SERVICE" ||
+  die "Sub2API failed its internal health check"
+
+if [[ "$PROXY_CHANGED" -eq 1 || "$PROXY_UNIT_CHANGED" -eq 1 ]] ||
+  ! systemctl is-active --quiet "$PROXY_SERVICE"; then
+  log "starting/restarting stream-hold proxy on public port ${PUBLIC_PORT}"
+  sudo systemctl restart "$PROXY_SERVICE"
+else
+  log "stream-hold proxy binary unchanged; keeping the existing process and active client streams"
+fi
+
+wait_http "http://127.0.0.1:${PUBLIC_PORT}/_stream-hold/health" "$PROXY_SERVICE" ||
+  die "stream-hold proxy failed its health check"
+wait_http "http://127.0.0.1:${PUBLIC_PORT}/health" "$PROXY_SERVICE" ||
+  die "public Sub2API health check through the proxy failed"
+
+ROOT_CODE="$(curl -sS -m 5 -o /tmp/sub2api-root.html -w '%{http_code}' "http://127.0.0.1:${PUBLIC_PORT}/" || true)"
+[[ "$ROOT_CODE" == "200" ]] || die "public frontend returned HTTP $ROOT_CODE"
+grep -Ei '<!doctype html>|<title>' /tmp/sub2api-root.html >/dev/null ||
+  die "public frontend is not serving HTML"
+
+SUB2API_PID="$(systemctl show "$SUB2API_SERVICE" -p MainPID --value)"
+PROXY_PID="$(systemctl show "$PROXY_SERVICE" -p MainPID --value)"
+mapfile -t INTERNAL_PIDS < <(listener_pids "$SUB2API_PORT")
+mapfile -t PUBLIC_PIDS < <(listener_pids "$PUBLIC_PORT")
+[[ ${#INTERNAL_PIDS[@]} -eq 1 && "${INTERNAL_PIDS[0]}" == "$SUB2API_PID" ]] ||
+  die "internal port ${SUB2API_PORT} is not owned solely by $SUB2API_SERVICE pid=$SUB2API_PID"
+[[ ${#PUBLIC_PIDS[@]} -eq 1 && "${PUBLIC_PIDS[0]}" == "$PROXY_PID" ]] ||
+  die "public port ${PUBLIC_PORT} is not owned solely by $PROXY_SERVICE pid=$PROXY_PID"
+
+log "OK source=${SOURCE_VERSION} sub2api_pid=${SUB2API_PID} proxy_pid=${PROXY_PID} proxy_version=${PROXY_VERSION} public=:${PUBLIC_PORT} internal=:${SUB2API_PORT}"

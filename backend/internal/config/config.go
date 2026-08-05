@@ -874,29 +874,6 @@ type ImageConcurrencyConfig struct {
 	MaxWaitingRequests int `mapstructure:"max_waiting_requests"`
 }
 
-// GatewayOpenAIStreamHoldConfig controls request-level recovery for streaming
-// OpenAI Responses requests before the first semantic output reaches the client.
-type GatewayOpenAIStreamHoldConfig struct {
-	// Enabled keeps retryable requests open instead of returning a terminal error.
-	Enabled bool `mapstructure:"enabled"`
-	// UpstreamAttemptTimeout bounds each pre-output upstream attempt while the downstream request remains held.
-	UpstreamAttemptTimeout time.Duration `mapstructure:"upstream_attempt_timeout"`
-	// MinRetryInterval is the initial delay between exhausted scheduling cycles.
-	MinRetryInterval time.Duration `mapstructure:"min_retry_interval"`
-	// MaxRetryInterval caps exponential retry backoff.
-	MaxRetryInterval time.Duration `mapstructure:"max_retry_interval"`
-	// RetryJitterRatio spreads retries to avoid synchronized recovery bursts.
-	RetryJitterRatio float64 `mapstructure:"retry_jitter_ratio"`
-	// MaxDuration limits total hold time. Zero means wait until success or client cancellation.
-	MaxDuration time.Duration `mapstructure:"max_duration"`
-	// TrackingHeartbeatInterval refreshes the active-hold lease while an upstream attempt is running.
-	TrackingHeartbeatInterval time.Duration `mapstructure:"tracking_heartbeat_interval"`
-	// TrackingLeaseTTL removes abandoned active-hold records after a process or request dies.
-	TrackingLeaseTTL time.Duration `mapstructure:"tracking_lease_ttl"`
-	// TrackingOperationTimeout bounds each Redis tracking operation.
-	TrackingOperationTimeout time.Duration `mapstructure:"tracking_operation_timeout"`
-}
-
 const (
 	ImageConcurrencyOverflowModeReject = "reject"
 	ImageConcurrencyOverflowModeWait   = "wait"
@@ -969,8 +946,6 @@ type GatewayConfig struct {
 	OpenAIProxyStreamCircuit GatewayOpenAIProxyStreamCircuitConfig `mapstructure:"openai_proxy_stream_circuit"`
 	// ImageConcurrency: 图片生成独立并发限制配置（默认关闭）
 	ImageConcurrency ImageConcurrencyConfig `mapstructure:"image_concurrency"`
-	// OpenAIStreamHold: streaming Responses 首个语义输出前的持续等待策略。
-	OpenAIStreamHold GatewayOpenAIStreamHoldConfig `mapstructure:"openai_stream_hold"`
 
 	// HTTP 上游连接池配置（性能优化：支持高并发场景调优）
 	// MaxIdleConns: 所有主机的最大空闲连接总数
@@ -2339,15 +2314,6 @@ func setDefaults() {
 	viper.SetDefault("gateway.image_concurrency.overflow_mode", ImageConcurrencyOverflowModeReject)
 	viper.SetDefault("gateway.image_concurrency.wait_timeout_seconds", 30)
 	viper.SetDefault("gateway.image_concurrency.max_waiting_requests", 100)
-	viper.SetDefault("gateway.openai_stream_hold.enabled", false)
-	viper.SetDefault("gateway.openai_stream_hold.upstream_attempt_timeout", 3*time.Minute)
-	viper.SetDefault("gateway.openai_stream_hold.min_retry_interval", time.Second)
-	viper.SetDefault("gateway.openai_stream_hold.max_retry_interval", 30*time.Second)
-	viper.SetDefault("gateway.openai_stream_hold.retry_jitter_ratio", 0.2)
-	viper.SetDefault("gateway.openai_stream_hold.max_duration", time.Duration(0))
-	viper.SetDefault("gateway.openai_stream_hold.tracking_heartbeat_interval", 10*time.Second)
-	viper.SetDefault("gateway.openai_stream_hold.tracking_lease_ttl", 45*time.Second)
-	viper.SetDefault("gateway.openai_stream_hold.tracking_operation_timeout", 2*time.Second)
 	viper.SetDefault("gateway.antigravity_fallback_cooldown_minutes", 1)
 	viper.SetDefault("gateway.antigravity_extra_retries", 10)
 	viper.SetDefault("gateway.max_body_size", int64(256*1024*1024))
@@ -3190,50 +3156,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.ImageConcurrency.MaxWaitingRequests < 0 {
 		return fmt.Errorf("gateway.image_concurrency.max_waiting_requests must be non-negative")
-	}
-	streamHold := c.Gateway.OpenAIStreamHold
-	if streamHold.Enabled ||
-		streamHold.UpstreamAttemptTimeout != 0 ||
-		streamHold.MinRetryInterval != 0 ||
-		streamHold.MaxRetryInterval != 0 ||
-		streamHold.RetryJitterRatio != 0 ||
-		streamHold.MaxDuration != 0 ||
-		streamHold.TrackingHeartbeatInterval != 0 ||
-		streamHold.TrackingLeaseTTL != 0 ||
-		streamHold.TrackingOperationTimeout != 0 {
-		if streamHold.UpstreamAttemptTimeout <= 0 {
-			return fmt.Errorf("gateway.openai_stream_hold.upstream_attempt_timeout must be positive")
-		}
-		if streamHold.UpstreamAttemptTimeout > 30*time.Minute {
-			return fmt.Errorf("gateway.openai_stream_hold.upstream_attempt_timeout must not exceed 30m")
-		}
-		if streamHold.MinRetryInterval <= 0 {
-			return fmt.Errorf("gateway.openai_stream_hold.min_retry_interval must be positive")
-		}
-		if streamHold.MaxRetryInterval < streamHold.MinRetryInterval {
-			return fmt.Errorf("gateway.openai_stream_hold.max_retry_interval must be greater than or equal to min_retry_interval")
-		}
-		if streamHold.MaxRetryInterval > 10*time.Minute {
-			return fmt.Errorf("gateway.openai_stream_hold.max_retry_interval must not exceed 10m")
-		}
-		if streamHold.RetryJitterRatio < 0 || streamHold.RetryJitterRatio > 1 {
-			return fmt.Errorf("gateway.openai_stream_hold.retry_jitter_ratio must be within [0,1]")
-		}
-		if streamHold.MaxDuration < 0 {
-			return fmt.Errorf("gateway.openai_stream_hold.max_duration must be non-negative")
-		}
-		if streamHold.TrackingHeartbeatInterval <= 0 {
-			return fmt.Errorf("gateway.openai_stream_hold.tracking_heartbeat_interval must be positive")
-		}
-		if streamHold.TrackingLeaseTTL < 3*streamHold.TrackingHeartbeatInterval {
-			return fmt.Errorf("gateway.openai_stream_hold.tracking_lease_ttl must be at least three times tracking_heartbeat_interval")
-		}
-		if streamHold.TrackingOperationTimeout <= 0 {
-			return fmt.Errorf("gateway.openai_stream_hold.tracking_operation_timeout must be positive")
-		}
-		if streamHold.TrackingOperationTimeout >= streamHold.TrackingHeartbeatInterval {
-			return fmt.Errorf("gateway.openai_stream_hold.tracking_operation_timeout must be less than tracking_heartbeat_interval")
-		}
 	}
 	if c.Gateway.MaxIdleConns <= 0 {
 		return fmt.Errorf("gateway.max_idle_conns must be positive")

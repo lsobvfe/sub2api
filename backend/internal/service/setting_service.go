@@ -61,7 +61,6 @@ type SettingService struct {
 	openAICodexVersionSF        singleflight.Group
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group
-	openAIStreamHoldEnabled     atomic.Bool
 
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
 	cyberSessionBlockRuntimeSF    singleflight.Group
@@ -209,14 +208,10 @@ const (
 
 // NewSettingService 创建系统设置服务实例
 func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *SettingService {
-	svc := &SettingService{
+	return &SettingService{
 		settingRepo: settingRepo,
 		cfg:         cfg,
 	}
-	if cfg != nil {
-		svc.openAIStreamHoldEnabled.Store(cfg.Gateway.OpenAIStreamHold.Enabled)
-	}
-	return svc
 }
 
 // SetDefaultSubscriptionGroupReader injects an optional group reader for default subscription validation.

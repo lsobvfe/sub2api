@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"html"
 	"sort"
@@ -656,9 +655,6 @@ func (s *APIKeyService) VerifyOwnership(ctx context.Context, userID int64, apiKe
 
 // GetByID 根据ID获取API Key
 func (s *APIKeyService) GetByID(ctx context.Context, id int64) (*APIKey, error) {
-	if s == nil || s.apiKeyRepo == nil {
-		return nil, errors.New("api key repository is not configured")
-	}
 	apiKey, err := s.apiKeyRepo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get api key: %w", err)
@@ -668,52 +664,6 @@ func (s *APIKeyService) GetByID(ctx context.Context, id int64) (*APIKey, error) 
 		apiKey.CurrentConcurrency = s.currentConcurrencyForAPIKey(ctx, apiKey.ID)
 	}
 	return apiKey, nil
-}
-
-type GatewayAPIKeyRuntimeState struct {
-	APIKey       *APIKey
-	Subscription *UserSubscription
-}
-
-// LoadGatewayRuntimeState reloads the authoritative routing and billing identity
-// for a request that has remained open across a stream-hold retry boundary.
-func (s *APIKeyService) LoadGatewayRuntimeState(ctx context.Context, id int64) (*GatewayAPIKeyRuntimeState, error) {
-	apiKey, err := s.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if apiKey == nil || !apiKey.IsActive() || apiKey.IsExpired() || apiKey.IsQuotaExhausted() {
-		return nil, errors.New("api key is not active")
-	}
-	if apiKey.User == nil || !apiKey.User.IsActive() {
-		return nil, errors.New("api key user is not active")
-	}
-
-	state := &GatewayAPIKeyRuntimeState{APIKey: apiKey}
-	if apiKey.GroupID == nil {
-		return state, nil
-	}
-	if apiKey.Group == nil || apiKey.Group.ID != *apiKey.GroupID || !apiKey.Group.IsActive() {
-		return nil, errors.New("api key group is not active")
-	}
-	if !apiKey.Group.IsSubscriptionType() {
-		if !apiKey.User.CanBindGroup(apiKey.Group.ID, apiKey.Group.IsExclusive) {
-			return nil, ErrGroupNotAllowed
-		}
-		return state, nil
-	}
-	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
-		return state, nil
-	}
-	if s.userSubRepo == nil {
-		return nil, errors.New("user subscription repository is not configured")
-	}
-	subscription, err := s.userSubRepo.GetActiveByUserIDAndGroupID(ctx, apiKey.User.ID, apiKey.Group.ID)
-	if err != nil {
-		return nil, fmt.Errorf("get active gateway subscription: %w", err)
-	}
-	state.Subscription = subscription
-	return state, nil
 }
 
 // GetByKey 根据Key字符串获取API Key（用于认证）

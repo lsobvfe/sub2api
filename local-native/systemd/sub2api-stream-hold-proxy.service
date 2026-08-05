@@ -1,0 +1,23 @@
+[Unit]
+Description=Sub2API Independent Stream Hold Proxy
+After=network-online.target sub2api-source.service
+Wants=sub2api-source.service
+
+[Service]
+Type=simple
+User=blue
+Group=blue
+WorkingDirectory=/home/blue/proj/Monorepo/third_party/INTEGRATIONS/Wei-Shaw__sub2api/local-native/runtime/work
+EnvironmentFile=/home/blue/proj/Monorepo/third_party/INTEGRATIONS/Wei-Shaw__sub2api/local-native/runtime/stream-hold-proxy.env
+ExecStart=/home/blue/proj/Monorepo/third_party/INTEGRATIONS/Wei-Shaw__sub2api/local-native/build/sub2api-stream-hold-proxy
+Restart=always
+RestartSec=2
+TimeoutStopSec=35
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sub2api-stream-hold-proxy
+LimitNOFILE=100000
+
+[Install]
+WantedBy=multi-user.target

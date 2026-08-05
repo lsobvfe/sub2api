@@ -2,7 +2,6 @@ package repository
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -49,24 +48,6 @@ func TestHTTPUpstreamDoCanDisableRedirectsPerRequest(t *testing.T) {
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	require.NoError(t, resp.Body.Close())
 	require.Zero(t, redirectedCalls.Load())
-}
-
-func TestHTTPClientForUpstreamRequestResponseHeaderTimeout(t *testing.T) {
-	client := &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			<-req.Context().Done()
-			return nil, req.Context().Err()
-		}),
-	}
-	ctx := service.WithHTTPUpstreamResponseHeaderTimeout(context.Background(), 20*time.Millisecond)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://upstream.example/v1/responses", nil)
-	require.NoError(t, err)
-
-	startedAt := time.Now()
-	_, err = httpClientForUpstreamRequest(client, req).Do(req)
-
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Less(t, time.Since(startedAt), time.Second)
 }
 
 func TestHTTPUpstreamDoWithTLSPlainHTTPUsesConfiguredHTTPProxy(t *testing.T) {

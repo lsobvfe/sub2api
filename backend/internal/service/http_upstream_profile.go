@@ -1,9 +1,6 @@
 package service
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 // HTTPUpstreamProfile marks HTTP upstream requests that need provider-specific
 // transport policy.
@@ -16,7 +13,6 @@ const (
 
 type httpUpstreamProfileContextKey struct{}
 type httpUpstreamDisableRedirectsContextKey struct{}
-type httpUpstreamResponseHeaderTimeoutContextKey struct{}
 
 // WithHTTPUpstreamProfile injects an upstream transport profile into ctx.
 func WithHTTPUpstreamProfile(ctx context.Context, profile HTTPUpstreamProfile) context.Context {
@@ -57,27 +53,4 @@ func WithHTTPUpstreamRedirectsDisabled(ctx context.Context) context.Context {
 
 func HTTPUpstreamRedirectsDisabled(ctx context.Context) bool {
 	return ctx != nil && ctx.Value(httpUpstreamDisableRedirectsContextKey{}) == true
-}
-
-// WithHTTPUpstreamResponseHeaderTimeout applies a response-header deadline to
-// one request without changing the shared transport pool.
-func WithHTTPUpstreamResponseHeaderTimeout(ctx context.Context, timeout time.Duration) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if timeout <= 0 {
-		return ctx
-	}
-	return context.WithValue(ctx, httpUpstreamResponseHeaderTimeoutContextKey{}, timeout)
-}
-
-func HTTPUpstreamResponseHeaderTimeoutFromContext(ctx context.Context) time.Duration {
-	if ctx == nil {
-		return 0
-	}
-	timeout, _ := ctx.Value(httpUpstreamResponseHeaderTimeoutContextKey{}).(time.Duration)
-	if timeout <= 0 {
-		return 0
-	}
-	return timeout
 }
