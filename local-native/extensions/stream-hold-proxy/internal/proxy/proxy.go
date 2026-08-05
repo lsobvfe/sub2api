@@ -106,13 +106,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, body []byte) {
-	requestID := requestIdentity(request)
+	requestID := newLeaseIdentity()
+	clientRequestID := clientRequestIdentity(request)
 	startedAt := time.Now()
-	p.registry.start(requestID, request.Method, request.URL.Path, startedAt)
+	p.registry.start(requestID, clientRequestID, request.Method, request.URL.Path, startedAt)
 	defer p.registry.finish(requestID)
 
 	p.logger.Info("hold_request_started",
 		"request_id", requestID,
+		"client_request_id", clientRequestID,
 		"method", request.Method,
 		"path", request.URL.Path,
 	)
@@ -130,8 +132,9 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 	if err := writeKeepalive(w, controller, "connected"); err != nil {
 		p.logger.Info("hold_client_disconnected",
 			"request_id", requestID,
+			"client_request_id", clientRequestID,
 			"attempts", 0,
-			"held_for", time.Since(startedAt),
+			"held_for", time.Since(startedAt).String(),
 			"error", err,
 		)
 		return
@@ -142,19 +145,20 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 
 	for attempt := 1; ; attempt++ {
 		if request.Context().Err() != nil {
-			p.logClientCancellation(requestID, attempt-1, startedAt, request.Context().Err())
+			p.logClientCancellation(requestID, clientRequestID, attempt-1, startedAt, request.Context().Err())
 			return
 		}
 		p.registry.attempt(requestID, attempt, time.Now())
 		p.logger.Info("hold_attempt_started",
 			"request_id", requestID,
+			"client_request_id", clientRequestID,
 			"attempt", attempt,
 			"path", request.URL.Path,
 		)
 
 		result, connected := p.waitForAttempt(w, controller, keepaliveTicker, request, body)
 		if !connected {
-			p.logClientCancellation(requestID, attempt, startedAt, request.Context().Err())
+			p.logClientCancellation(requestID, clientRequestID, attempt, startedAt, request.Context().Err())
 			return
 		}
 		if result.successful() {
@@ -162,8 +166,9 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 				_ = os.Remove(result.SpoolPath)
 				p.logger.Info("hold_client_disconnected",
 					"request_id", requestID,
+					"client_request_id", clientRequestID,
 					"attempts", attempt,
-					"held_for", time.Since(startedAt),
+					"held_for", time.Since(startedAt).String(),
 					"error", err,
 				)
 				return
@@ -171,9 +176,10 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 			_ = os.Remove(result.SpoolPath)
 			p.logger.Info("hold_request_recovered",
 				"request_id", requestID,
+				"client_request_id", clientRequestID,
 				"attempts", attempt,
-				"held_for", time.Since(startedAt),
-				"attempt_duration", result.Duration,
+				"held_for", time.Since(startedAt).String(),
+				"attempt_duration", result.Duration.String(),
 				"response_bytes", result.Bytes,
 				"upstream_request_id", result.UpstreamRequestID,
 			)
@@ -185,15 +191,16 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 		p.registry.failed(requestID, result.Status, result.Message, nextRetry)
 		p.logger.Warn("hold_attempt_failed",
 			"request_id", requestID,
+			"client_request_id", clientRequestID,
 			"attempt", attempt,
 			"status", result.Status,
 			"error", result.Message,
-			"attempt_duration", result.Duration,
+			"attempt_duration", result.Duration.String(),
 			"upstream_request_id", result.UpstreamRequestID,
-			"retry_in", delay,
+			"retry_in", delay.String(),
 		)
 		if !p.waitForRetry(w, controller, keepaliveTicker, request.Context(), delay) {
-			p.logClientCancellation(requestID, attempt, startedAt, request.Context().Err())
+			p.logClientCancellation(requestID, clientRequestID, attempt, startedAt, request.Context().Err())
 			return
 		}
 	}
@@ -279,11 +286,12 @@ func (p *Proxy) retryDelay(attempt int) time.Duration {
 	return jittered
 }
 
-func (p *Proxy) logClientCancellation(requestID string, attempts int, startedAt time.Time, err error) {
+func (p *Proxy) logClientCancellation(requestID, clientRequestID string, attempts int, startedAt time.Time, err error) {
 	p.logger.Info("hold_client_disconnected",
 		"request_id", requestID,
+		"client_request_id", clientRequestID,
 		"attempts", attempts,
-		"held_for", time.Since(startedAt),
+		"held_for", time.Since(startedAt).String(),
 		"error", err,
 	)
 }
@@ -330,12 +338,16 @@ func isStreamingRequest(body []byte) bool {
 	return json.Unmarshal(body, &request) == nil && request.Stream
 }
 
-func requestIdentity(request *http.Request) string {
+func clientRequestIdentity(request *http.Request) string {
 	for _, header := range []string{"x-client-request-id", "x-request-id", "traceparent"} {
 		if value := strings.TrimSpace(request.Header.Get(header)); value != "" {
 			return truncate(value, 128)
 		}
 	}
+	return ""
+}
+
+func newLeaseIdentity() string {
 	randomBytes := make([]byte, 12)
 	if _, err := rand.Read(randomBytes); err == nil {
 		return hex.EncodeToString(randomBytes)

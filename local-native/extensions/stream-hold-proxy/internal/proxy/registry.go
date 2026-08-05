@@ -7,16 +7,17 @@ import (
 )
 
 type holdSnapshot struct {
-	RequestID  string     `json:"request_id"`
-	Method     string     `json:"method"`
-	Path       string     `json:"path"`
-	StartedAt  time.Time  `json:"started_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	Attempts   int        `json:"attempts"`
-	Phase      string     `json:"phase"`
-	LastStatus int        `json:"last_status,omitempty"`
-	LastError  string     `json:"last_error,omitempty"`
-	NextRetry  *time.Time `json:"next_retry_at,omitempty"`
+	RequestID       string     `json:"request_id"`
+	ClientRequestID string     `json:"client_request_id,omitempty"`
+	Method          string     `json:"method"`
+	Path            string     `json:"path"`
+	StartedAt       time.Time  `json:"started_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	Attempts        int        `json:"attempts"`
+	Phase           string     `json:"phase"`
+	LastStatus      int        `json:"last_status,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	NextRetry       *time.Time `json:"next_retry_at,omitempty"`
 }
 
 type holdRegistry struct {
@@ -28,16 +29,17 @@ func newHoldRegistry() *holdRegistry {
 	return &holdRegistry{active: make(map[string]holdSnapshot)}
 }
 
-func (r *holdRegistry) start(requestID, method, path string, now time.Time) {
+func (r *holdRegistry) start(requestID, clientRequestID, method, path string, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.active[requestID] = holdSnapshot{
-		RequestID: requestID,
-		Method:    method,
-		Path:      path,
-		StartedAt: now.UTC(),
-		UpdatedAt: now.UTC(),
-		Phase:     "starting",
+		RequestID:       requestID,
+		ClientRequestID: clientRequestID,
+		Method:          method,
+		Path:            path,
+		StartedAt:       now.UTC(),
+		UpdatedAt:       now.UTC(),
+		Phase:           "starting",
 	}
 }
 

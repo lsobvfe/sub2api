@@ -286,7 +286,7 @@
           .map(
             (item) => `
               <tr>
-                <td>${escapeHTML(item.request_id)}<br />${escapeHTML(item.path)}</td>
+                <td>${escapeHTML(item.request_id)}<br />${escapeHTML(item.client_request_id || item.path)}</td>
                 <td>${escapeHTML(item.phase)}</td>
                 <td>${item.attempts}</td>
                 <td>${elapsed(item.started_at)}</td>
