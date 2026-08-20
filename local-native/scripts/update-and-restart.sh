@@ -22,6 +22,7 @@ VERSION_FILE="$ROOT/backend/cmd/server/VERSION"
 UPSTREAM_REMOTE="${SUB2API_UPSTREAM_REMOTE:-upstream}"
 UPSTREAM_BRANCH="${SUB2API_UPSTREAM_BRANCH:-main}"
 FETCH_ATTEMPTS="${SUB2API_FETCH_ATTEMPTS:-5}"
+BUILD_ATTEMPTS="${SUB2API_BUILD_ATTEMPTS:-3}"
 PNPM_VERSION="${SUB2API_PNPM_VERSION:-9.15.9}"
 
 log() { printf '[sub2api] %s\n' "$*"; }
@@ -70,6 +71,21 @@ fetch_upstream() {
     sleep "$delay"
   done
   return 1
+}
+
+retry_build() {
+  local description="$1"
+  shift
+  local attempt delay
+  for attempt in $(seq 1 "$BUILD_ATTEMPTS"); do
+    if "$@"; then
+      return 0
+    fi
+    [[ "$attempt" -lt "$BUILD_ATTEMPTS" ]] || return 1
+    delay=$((attempt * 2))
+    log "${description} failed (attempt ${attempt}/${BUILD_ATTEMPTS}); retry in ${delay}s"
+    sleep "$delay"
+  done
 }
 
 assert_tracking_matches_remote_tip() {
@@ -203,7 +219,7 @@ VERSION="$(cd "$ROOT/backend" && ./scripts/resolve-version.sh)"
 [[ "$VERSION" == "$SOURCE_VERSION" ]] ||
   die "resolved version $VERSION does not match source version $SOURCE_VERSION"
 SUB2API_TMP="$BIN_DIR/sub2api-source.new"
-(
+build_sub2api() (
   cd "$ROOT/backend"
   GOTOOLCHAIN=auto CGO_ENABLED=0 go build \
     -tags embed \
@@ -212,6 +228,8 @@ SUB2API_TMP="$BIN_DIR/sub2api-source.new"
     -o "$SUB2API_TMP" \
     ./cmd/server
 )
+retry_build "Sub2API build" build_sub2api ||
+  die "Sub2API build failed after ${BUILD_ATTEMPTS} attempts"
 if strings "$SUB2API_TMP" | grep -F 'Frontend not embedded' >/dev/null; then
   rm -f "$SUB2API_TMP"
   die "Sub2API binary does not contain the embedded frontend"
@@ -223,7 +241,7 @@ BIN_VERSION="$(binary_version "$SUB2API_TMP")" || die "cannot read Sub2API binar
 PROXY_VERSION="$(proxy_source_version)"
 PROXY_TMP="$BIN_DIR/sub2api-stream-hold-proxy.new"
 log "building independent stream-hold proxy version=${PROXY_VERSION}"
-(
+build_proxy() (
   cd "$PROXY_ROOT"
   CGO_ENABLED=0 go build \
     -buildvcs=false \
@@ -232,6 +250,8 @@ log "building independent stream-hold proxy version=${PROXY_VERSION}"
     -o "$PROXY_TMP" \
     ./cmd/stream-hold-proxy
 )
+retry_build "stream-hold proxy build" build_proxy ||
+  die "stream-hold proxy build failed after ${BUILD_ATTEMPTS} attempts"
 "$PROXY_TMP" -version | grep -F "$PROXY_VERSION" >/dev/null ||
   die "cannot verify stream-hold proxy version"
 
