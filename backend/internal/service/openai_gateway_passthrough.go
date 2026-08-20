@@ -37,8 +37,9 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	reqStream bool,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
+	rawRelay := account != nil && account.IsOpenAIRawRelayEnabled()
 	upstreamPassthroughModel := ""
-	if isOpenAIResponsesCompactPath(c) {
+	if !rawRelay && isOpenAIResponsesCompactPath(c) {
 		compactMappedModel := resolveOpenAICompactForwardModel(account, reqModel)
 		if compactMappedModel != "" && compactMappedModel != reqModel {
 			nextBody, setErr := sjson.SetBytes(body, "model", compactMappedModel)
@@ -82,12 +83,14 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		reqStream = gjson.GetBytes(body, "stream").Bool()
 	}
 
-	sanitizedBody, sanitized, err := sanitizeEmptyBase64InputImagesInOpenAIBody(body)
-	if err != nil {
-		return nil, err
-	}
-	if sanitized {
-		body = sanitizedBody
+	if !rawRelay {
+		sanitizedBody, sanitized, err := sanitizeEmptyBase64InputImagesInOpenAIBody(body)
+		if err != nil {
+			return nil, err
+		}
+		if sanitized {
+			body = sanitizedBody
+		}
 	}
 
 	// Apply OpenAI fast policy to the passthrough body (filter/block by service_tier).
@@ -100,15 +103,17 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if policyModel == "" {
 		policyModel = reqModel
 	}
-	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, policyModel, body)
-	if policyErr != nil {
-		var blocked *OpenAIFastBlockedError
-		if errors.As(policyErr, &blocked) {
-			writeOpenAIFastPolicyBlockedResponse(c, blocked)
+	if !rawRelay {
+		updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, policyModel, body)
+		if policyErr != nil {
+			var blocked *OpenAIFastBlockedError
+			if errors.As(policyErr, &blocked) {
+				writeOpenAIFastPolicyBlockedResponse(c, blocked)
+			}
+			return nil, policyErr
 		}
-		return nil, policyErr
+		body = updatedBody
 	}
-	body = updatedBody
 
 	apiKey := getAPIKeyFromContext(c)
 	// 同一 attempt 的最终 model/body 只判定一次，权限检查与后续图片状态设置共用该结果。
@@ -195,7 +200,13 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	var resp *http.Response
 	for {
 		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
-		upstreamReq, buildErr := s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
+		var upstreamReq *http.Request
+		var buildErr error
+		if rawRelay {
+			upstreamReq, buildErr = s.buildUpstreamRequestOpenAIRawRelay(upstreamCtx, c, account, body, token)
+		} else {
+			upstreamReq, buildErr = s.buildUpstreamRequestOpenAIPassthrough(upstreamCtx, c, account, body, token)
+		}
 		releaseUpstreamCtx()
 		if buildErr != nil {
 			return nil, buildErr

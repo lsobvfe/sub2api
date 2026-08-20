@@ -129,9 +129,23 @@ done
 
 cd "$ROOT"
 git rev-parse --is-inside-work-tree >/dev/null || die "not a git repository: $ROOT"
-if [[ -n "$(git status --porcelain)" ]]; then
-  git status --short >&2
-  die "worktree is dirty; commit the intended changes before update-and-restart"
+log "git status (pre-commit)"
+git status --short || true
+
+# Snapshot all trackable changes before merging upstream. Ignored runtime
+# secrets and build artifacts remain excluded by .gitignore.
+git add -A
+if ! git diff --cached --quiet; then
+  if git diff --cached --name-only |
+    grep -E '(^|/)sub2api\.env$|(^|/)config\.yaml$|\.dump$|\.env$' >/dev/null; then
+    die "refusing to commit secrets/dumps; unstage and fix gitignore"
+  fi
+  BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  MSG="chore: snapshot worktree before update-and-restart (${BRANCH})"
+  log "committing whole-repo trackable changes: $MSG"
+  git commit -m "$MSG"
+else
+  log "nothing to commit (clean trackable worktree)"
 fi
 
 mkdir -p "$BIN_DIR" "$WORK"

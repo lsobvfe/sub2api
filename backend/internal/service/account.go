@@ -1708,6 +1708,9 @@ func (a *Account) IsOpenAIPassthroughEnabled() bool {
 	if a == nil || !a.IsOpenAI() || a.Extra == nil {
 		return false
 	}
+	if a.IsOpenAIRawRelayEnabled() {
+		return true
+	}
 	if enabled, ok := a.Extra["openai_passthrough"].(bool); ok {
 		return enabled
 	}

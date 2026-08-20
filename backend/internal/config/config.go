@@ -23,6 +23,11 @@ const (
 	RunModeSimple   = "simple"
 )
 
+const (
+	maxSharedPostgresOpenConnections = 16
+	maxSharedPostgresIdleConnections = 4
+)
+
 // 使用量记录队列溢出策略
 const (
 	UsageRecordOverflowPolicyDrop   = "drop"
@@ -1448,12 +1453,12 @@ func (d *DatabaseConfig) DSN() string {
 	// 当密码为空时不包含 password 参数，避免 libpq 解析错误
 	if d.Password == "" {
 		return fmt.Sprintf(
-			"host=%s port=%d user=%s dbname=%s sslmode=%s",
+			"host=%s port=%d user=%s dbname=%s sslmode=%s application_name=sub2api-source",
 			d.Host, d.Port, d.User, d.DBName, d.SSLMode,
 		)
 	}
 	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s application_name=sub2api-source",
 		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode,
 	)
 }
@@ -1466,12 +1471,12 @@ func (d *DatabaseConfig) DSNWithTimezone(tz string) string {
 	// 当密码为空时不包含 password 参数，避免 libpq 解析错误
 	if d.Password == "" {
 		return fmt.Sprintf(
-			"host=%s port=%d user=%s dbname=%s sslmode=%s TimeZone=%s",
+			"host=%s port=%d user=%s dbname=%s sslmode=%s application_name=sub2api-source TimeZone=%s",
 			d.Host, d.Port, d.User, d.DBName, d.SSLMode, tz,
 		)
 	}
 	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s TimeZone=%s",
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s application_name=sub2api-source TimeZone=%s",
 		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, tz,
 	)
 }
@@ -2928,8 +2933,20 @@ func (c *Config) Validate() error {
 	if c.Database.MaxOpenConns <= 0 {
 		return fmt.Errorf("database.max_open_conns must be positive")
 	}
+	if c.Database.MaxOpenConns > maxSharedPostgresOpenConnections {
+		return fmt.Errorf(
+			"database.max_open_conns cannot exceed %d for the shared PostgreSQL instance",
+			maxSharedPostgresOpenConnections,
+		)
+	}
 	if c.Database.MaxIdleConns < 0 {
 		return fmt.Errorf("database.max_idle_conns must be non-negative")
+	}
+	if c.Database.MaxIdleConns > maxSharedPostgresIdleConnections {
+		return fmt.Errorf(
+			"database.max_idle_conns cannot exceed %d for the shared PostgreSQL instance",
+			maxSharedPostgresIdleConnections,
+		)
 	}
 	if c.Database.MaxIdleConns > c.Database.MaxOpenConns {
 		return fmt.Errorf("database.max_idle_conns cannot exceed database.max_open_conns")

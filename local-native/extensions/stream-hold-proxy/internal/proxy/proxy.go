@@ -297,7 +297,16 @@ func (p *Proxy) logClientCancellation(requestID, clientRequestID string, attempt
 }
 
 func writeKeepalive(w http.ResponseWriter, controller *http.ResponseController, phase string) error {
-	if _, err := fmt.Fprintf(w, ": stream-hold %s\n\n", phase); err != nil {
+	payload, err := json.Marshal(map[string]any{
+		"type": "response.metadata",
+		"stream_hold": map[string]string{
+			"phase": phase,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
 		return err
 	}
 	return controller.Flush()

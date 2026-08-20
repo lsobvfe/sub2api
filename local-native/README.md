@@ -25,7 +25,7 @@ local-native/extensions/stream-hold-proxy/
 3. 只有看到 `response.completed`（或 `[DONE]`）才向客户端回放。
 4. HTTP 错误、传输错误、`response.failed`、`response.incomplete`、无终止 EOF、流空闲和单次尝试超时全部丢弃并重试。
 5. 总等待时间不限；客户端取消后立即停止。
-6. 等待期间向客户端发送 SSE comment keepalive，避免客户端 idle timeout。
+6. 等待期间向客户端发送可解析但无业务输出的 SSE keepalive 事件，持续重置客户端 idle timeout。
 
 这意味着失败尝试即使已经生成部分 token，也不会把半截内容或错误泄露给客户端。
 

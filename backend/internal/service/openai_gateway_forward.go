@@ -23,6 +23,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	clearGrokResponsesClientToolMapping(c)
 	clearOpenAIResponsesNamespaceNames(c)
 	startTime := time.Now()
+	if account != nil && account.IsOpenAIRawRelayEnabled() {
+		rawBody := openAIRawRelayRequestBody(c, body)
+		reqModel, reqStream, _ := extractOpenAIRequestMetaFromBody(rawBody)
+		mappedModel := account.GetMappedModel(reqModel)
+		reasoningEffort := extractOpenAIReasoningEffortFromBody(rawBody, mappedModel)
+		return s.forwardOpenAIPassthrough(
+			ctx, c, account, rawBody, rawBody, reqModel, false, reasoningEffort, reqStream, startTime,
+		)
+	}
 	// 固定渠道映射后的请求级 canonical body；账号 normalize/strip 不得改写跨 failover hint。
 	canonicalImageIntentBody := body
 
