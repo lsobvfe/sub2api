@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,15 +21,16 @@ import (
 )
 
 type Proxy struct {
-	cfg        Config
-	logger     *slog.Logger
-	client     *http.Client
-	transport  *http.Transport
-	reverse    *httputil.ReverseProxy
-	controller *enableController
-	registry   *holdRegistry
-	randomMu   sync.Mutex
-	random     *mathrand.Rand
+	cfg         Config
+	logger      *slog.Logger
+	client      *http.Client
+	transport   *http.Transport
+	reverse     *httputil.ReverseProxy
+	controller  *enableController
+	registry    *holdRegistry
+	keyRegistry *holdKeyRegistry
+	randomMu    sync.Mutex
+	random      *mathrand.Rand
 }
 
 func New(cfg Config, logger *slog.Logger) (*Proxy, error) {
@@ -39,6 +41,10 @@ func New(cfg Config, logger *slog.Logger) (*Proxy, error) {
 		logger = slog.Default()
 	}
 	controller, err := newEnableController(cfg.Enabled, cfg.StateFile)
+	if err != nil {
+		return nil, err
+	}
+	keyRegistry, err := newHoldKeyRegistry(cfg.StateFile + ".keys")
 	if err != nil {
 		return nil, err
 	}
@@ -61,14 +67,15 @@ func New(cfg Config, logger *slog.Logger) (*Proxy, error) {
 	}
 
 	return &Proxy{
-		cfg:        cfg,
-		logger:     logger,
-		client:     &http.Client{Transport: transport, CheckRedirect: noRedirect},
-		transport:  transport,
-		reverse:    reverse,
-		controller: controller,
-		registry:   newHoldRegistry(),
-		random:     mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
+		cfg:         cfg,
+		logger:      logger,
+		client:      &http.Client{Transport: transport, CheckRedirect: noRedirect},
+		transport:   transport,
+		reverse:     reverse,
+		controller:  controller,
+		registry:    newHoldRegistry(),
+		keyRegistry: keyRegistry,
+		random:      mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
 	}, nil
 }
 
@@ -88,6 +95,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if !p.controller.Enabled() || request.Method != http.MethodPost || !p.cfg.protects(request.URL.Path) {
+		p.reverse.ServeHTTP(w, request)
+		return
+	}
+	if !p.keyRegistry.Contains(requestAPIKeyHash(request)) {
 		p.reverse.ServeHTTP(w, request)
 		return
 	}
@@ -345,6 +356,24 @@ func isStreamingRequest(body []byte) bool {
 		Stream bool `json:"stream"`
 	}
 	return json.Unmarshal(body, &request) == nil && request.Stream
+}
+
+func requestAPIKeyHash(request *http.Request) string {
+	credential := strings.TrimSpace(request.Header.Get("Authorization"))
+	parts := strings.Fields(credential)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+		credential = parts[1]
+	} else {
+		credential = strings.TrimSpace(request.Header.Get("x-api-key"))
+		if credential == "" {
+			credential = strings.TrimSpace(request.Header.Get("x-goog-api-key"))
+		}
+	}
+	if credential == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(credential))
+	return hex.EncodeToString(sum[:])
 }
 
 func clientRequestIdentity(request *http.Request) string {

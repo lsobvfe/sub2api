@@ -1,8 +1,8 @@
 [Unit]
 Description=Sub2API Official Source Runtime
 Documentation=https://github.com/Wei-Shaw/sub2api
-After=network.target postgresql.service redis-server.service
-Wants=postgresql.service redis-server.service
+After=network.target postgresql.service redis-server.service sub2api-stream-hold-proxy.service
+Wants=postgresql.service redis-server.service sub2api-stream-hold-proxy.service
 
 [Service]
 Type=simple

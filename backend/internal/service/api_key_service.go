@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -61,11 +62,12 @@ const (
 // 若编辑 Key 时无条件整行回写，并发累计的配额与限流计数就会被旧快照覆盖。
 // 因此调用方必须显式声明要改的列。
 type APIKeyUpdateFields struct {
-	Name      bool
-	Status    bool
-	Quota     bool
-	GroupID   bool
-	ExpiresAt bool
+	Name              bool
+	Status            bool
+	StreamHoldEnabled bool
+	Quota             bool
+	GroupID           bool
+	ExpiresAt         bool
 	// QuotaUsed 仅供"重置配额用量"路径声明；常规计费走 IncrementQuotaUsed。
 	QuotaUsed bool
 	// RateLimits 覆盖 rate_limit_5h / _1d / _7d 三个阈值。
@@ -109,6 +111,7 @@ type APIKeyRepository interface {
 	UpdateGroupIDByUserAndGroup(ctx context.Context, userID, oldGroupID, newGroupID int64) (int64, error)
 	CountByGroupID(ctx context.Context, groupID int64) (int64, error)
 	ListKeysByUserID(ctx context.Context, userID int64) ([]string, error)
+	ListStreamHoldEnabledKeys(ctx context.Context) ([]string, error)
 	ListKeysByGroupID(ctx context.Context, groupID int64) ([]string, error)
 
 	// Quota methods
@@ -209,11 +212,12 @@ type APIKeyAuthCacheInvalidator interface {
 
 // CreateAPIKeyRequest 创建API Key请求
 type CreateAPIKeyRequest struct {
-	Name        string   `json:"name"`
-	GroupID     *int64   `json:"group_id"`
-	CustomKey   *string  `json:"custom_key"`   // 可选的自定义key
-	IPWhitelist []string `json:"ip_whitelist"` // IP 白名单
-	IPBlacklist []string `json:"ip_blacklist"` // IP 黑名单
+	Name              string   `json:"name"`
+	GroupID           *int64   `json:"group_id"`
+	CustomKey         *string  `json:"custom_key"` // 可选的自定义key
+	StreamHoldEnabled *bool    `json:"stream_hold_enabled"`
+	IPWhitelist       []string `json:"ip_whitelist"` // IP 白名单
+	IPBlacklist       []string `json:"ip_blacklist"` // IP 黑名单
 
 	// Quota fields
 	Quota         float64 `json:"quota"`           // Quota limit in USD (0 = unlimited)
@@ -227,11 +231,12 @@ type CreateAPIKeyRequest struct {
 
 // UpdateAPIKeyRequest 更新API Key请求
 type UpdateAPIKeyRequest struct {
-	Name        *string   `json:"name"`
-	GroupID     *int64    `json:"group_id"`
-	Status      *string   `json:"status"`
-	IPWhitelist *[]string `json:"ip_whitelist"` // IP 白名单（nil 不修改，空数组清空）
-	IPBlacklist *[]string `json:"ip_blacklist"` // IP 黑名单（nil 不修改，空数组清空）
+	Name              *string   `json:"name"`
+	GroupID           *int64    `json:"group_id"`
+	Status            *string   `json:"status"`
+	StreamHoldEnabled *bool     `json:"stream_hold_enabled"`
+	IPWhitelist       *[]string `json:"ip_whitelist"` // IP 白名单（nil 不修改，空数组清空）
+	IPBlacklist       *[]string `json:"ip_blacklist"` // IP 黑名单（nil 不修改，空数组清空）
 
 	// Quota fields
 	Quota           *float64   `json:"quota"`       // Quota limit in USD (nil = no change, 0 = unlimited)
@@ -289,6 +294,7 @@ type APIKeyService struct {
 	userSubRepo               UserSubscriptionRepository
 	userGroupRateRepo         UserGroupRateRepository
 	cache                     APIKeyCache
+	streamHoldHook            StreamHoldHook
 	rateLimitCacheInvalid     RateLimitCacheInvalidator // optional: invalidate Redis rate limit cache
 	concurrencyService        *ConcurrencyService
 	cfg                       *config.Config
@@ -357,6 +363,21 @@ func NewAPIKeyService(
 	svc.authLookupSlots = make(chan struct{}, lookupConcurrency)
 	svc.invalidAuthAbuse = newInvalidAuthAbuseLimiter(cfg)
 	return svc
+}
+
+func (s *APIKeyService) SetStreamHoldHook(hook StreamHoldHook) {
+	s.streamHoldHook = hook
+}
+
+func (s *APIKeyService) SyncStreamHoldHook(ctx context.Context) error {
+	if s == nil || s.streamHoldHook == nil {
+		return nil
+	}
+	keys, err := s.apiKeyRepo.ListStreamHoldEnabledKeys(ctx)
+	if err != nil {
+		return err
+	}
+	return s.streamHoldHook.Sync(ctx, keys)
 }
 
 // SetRateLimitCacheInvalidator sets the optional rate limit cache invalidator.
@@ -532,18 +553,19 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 
 	// 创建API Key记录
 	apiKey := &APIKey{
-		UserID:      userID,
-		Key:         key,
-		Name:        html.EscapeString(req.Name),
-		GroupID:     req.GroupID,
-		Status:      StatusActive,
-		IPWhitelist: req.IPWhitelist,
-		IPBlacklist: req.IPBlacklist,
-		Quota:       req.Quota,
-		QuotaUsed:   0,
-		RateLimit5h: req.RateLimit5h,
-		RateLimit1d: req.RateLimit1d,
-		RateLimit7d: req.RateLimit7d,
+		UserID:            userID,
+		Key:               key,
+		Name:              html.EscapeString(req.Name),
+		GroupID:           req.GroupID,
+		Status:            StatusActive,
+		StreamHoldEnabled: boolValue(req.StreamHoldEnabled, true),
+		IPWhitelist:       req.IPWhitelist,
+		IPBlacklist:       req.IPBlacklist,
+		Quota:             req.Quota,
+		QuotaUsed:         0,
+		RateLimit5h:       req.RateLimit5h,
+		RateLimit1d:       req.RateLimit1d,
+		RateLimit7d:       req.RateLimit7d,
 	}
 
 	// Set expiration time if specified
@@ -558,6 +580,7 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 
 	s.InvalidateAuthCacheByKey(ctx, apiKey.Key)
 	s.compileAPIKeyIPRules(apiKey)
+	s.notifyStreamHold(ctx, apiKey.Key, apiKey.StreamHoldEnabled)
 
 	return apiKey, nil
 }
@@ -826,6 +849,11 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 		}
 	}
 
+	if req.StreamHoldEnabled != nil {
+		apiKey.StreamHoldEnabled = *req.StreamHoldEnabled
+		fields.StreamHoldEnabled = true
+	}
+
 	// Update quota fields
 	if req.Quota != nil {
 		apiKey.Quota = *req.Quota
@@ -904,6 +932,7 @@ func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req 
 
 	s.InvalidateAuthCacheByKey(ctx, apiKey.Key)
 	s.compileAPIKeyIPRules(apiKey)
+	s.notifyStreamHold(ctx, apiKey.Key, apiKey.StreamHoldEnabled)
 
 	// Invalidate Redis rate limit cache so reset takes effect immediately
 	if resetRateLimit && s.rateLimitCacheInvalid != nil {
@@ -936,8 +965,25 @@ func (s *APIKeyService) Delete(ctx context.Context, id int64, userID int64) erro
 	}
 	s.InvalidateAuthCacheByKey(ctx, key)
 	s.lastUsedTouchL1.Delete(id)
+	s.notifyStreamHold(ctx, key, false)
 
 	return nil
+}
+
+func boolValue(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func (s *APIKeyService) notifyStreamHold(ctx context.Context, key string, enabled bool) {
+	if s == nil || s.streamHoldHook == nil {
+		return
+	}
+	if err := s.streamHoldHook.Set(ctx, key, enabled); err != nil {
+		slog.Warn("stream_hold_hook_failed", "error", err)
+	}
 }
 
 // ValidateKey 验证API Key是否有效（用于认证中间件）

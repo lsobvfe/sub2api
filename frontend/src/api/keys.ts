@@ -65,7 +65,8 @@ export async function create(
   ipBlacklist?: string[],
   quota?: number,
   expiresInDays?: number,
-  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number }
+  rateLimitData?: { rate_limit_5h?: number; rate_limit_1d?: number; rate_limit_7d?: number },
+  streamHoldEnabled: boolean = true
 ): Promise<ApiKey> {
   const payload: CreateApiKeyRequest = { name }
   if (groupId !== undefined) {
@@ -74,6 +75,7 @@ export async function create(
   if (customKey) {
     payload.custom_key = customKey
   }
+  payload.stream_hold_enabled = streamHoldEnabled
   if (ipWhitelist && ipWhitelist.length > 0) {
     payload.ip_whitelist = ipWhitelist
   }

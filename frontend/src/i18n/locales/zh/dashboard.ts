@@ -104,6 +104,8 @@ export default {
     selectGroup: '选择分组',
     statusLabel: '状态',
     selectStatus: '选择状态',
+    streamHoldProxy: '经过 Hold Proxy',
+    streamHoldProxyHint: '开启后，流式请求会经过本机 Hold Proxy，并在上游临时失败时自动重试。',
     saving: '保存中...',
     noKeysYet: '暂无 API 密钥',
     createFirstKey: '创建您的第一个 API 密钥以开始使用 API。',

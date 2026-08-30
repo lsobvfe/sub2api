@@ -95,6 +95,11 @@ func Status(v string) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldStatus, v))
 }
 
+// StreamHoldEnabled applies equality check predicate on the "stream_hold_enabled" field. It's identical to StreamHoldEnabledEQ.
+func StreamHoldEnabled(v bool) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldStreamHoldEnabled, v))
+}
+
 // LastUsedAt applies equality check predicate on the "last_used_at" field. It's identical to LastUsedAtEQ.
 func LastUsedAt(v time.Time) predicate.APIKey {
 	return predicate.APIKey(sql.FieldEQ(FieldLastUsedAt, v))
@@ -533,6 +538,16 @@ func StatusEqualFold(v string) predicate.APIKey {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.APIKey {
 	return predicate.APIKey(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// StreamHoldEnabledEQ applies the EQ predicate on the "stream_hold_enabled" field.
+func StreamHoldEnabledEQ(v bool) predicate.APIKey {
+	return predicate.APIKey(sql.FieldEQ(FieldStreamHoldEnabled, v))
+}
+
+// StreamHoldEnabledNEQ applies the NEQ predicate on the "stream_hold_enabled" field.
+func StreamHoldEnabledNEQ(v bool) predicate.APIKey {
+	return predicate.APIKey(sql.FieldNEQ(FieldStreamHoldEnabled, v))
 }
 
 // LastUsedAtEQ applies the EQ predicate on the "last_used_at" field.

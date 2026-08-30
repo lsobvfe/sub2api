@@ -8,13 +8,13 @@ client :18081
   -> official Sub2API :18082
 ```
 
-Sub2API 的后端、前端、配置、Wire 和测试保持 `upstream/main` 原样。流式等待功能仅存在于：
+Sub2API 的后端、前端、配置、Wire 和测试尽量保持 `upstream/main` 原样。Hold Proxy 的 API key 开关通过一个窄 hook 接入，运行时仍与 proxy 独立：
 
 ```text
 local-native/extensions/stream-hold-proxy/
 ```
 
-该模块不 import Sub2API，不读取其数据库、账号、分组或运行时设置。每次重试都是一条新的普通 HTTP 请求，因此 API key 换分组、账号池变化和 Sub2API 重启都会在下一次请求中自然生效。
+该模块不 import Sub2API，不读取其数据库、账号、分组或运行时设置。Sub2API 只在 API key 变更和启动时向本机 proxy 注册 key hash；proxy 的请求热路径只查本地注册表。每次重试都是一条新的普通 HTTP 请求，因此 API key 换分组、账号池变化和 Sub2API 重启都会在下一次请求中自然生效。
 
 ## 流式语义
 
@@ -50,7 +50,7 @@ local-native/extensions/stream-hold-proxy/
 http://localhost:18081/_stream-hold/
 ```
 
-开关由代理自身持久化，不调用 Sub2API。停用后，新请求透明转发；已经被接管的请求继续完成，避免切换动作主动断开现有客户端。
+全局开关由代理自身持久化；API key 开关由 Sub2API 页面保存并同步到代理的 hash 注册表。停用后，新请求透明转发；已经被接管的请求继续完成，避免切换动作主动断开现有客户端。
 
 ## 更新
 

@@ -47,6 +47,9 @@ func (APIKey) Fields() []ent.Field {
 		field.String("status").
 			MaxLen(20).
 			Default(domain.StatusActive),
+		field.Bool("stream_hold_enabled").
+			Default(true).
+			Comment("Whether this API key uses the local stream hold proxy"),
 		field.Time("last_used_at").
 			Optional().
 			Nillable().

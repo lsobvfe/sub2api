@@ -52,6 +52,33 @@ func (p *Proxy) serveControl(w http.ResponseWriter, request *http.Request) {
 		}
 		p.logger.Info("hold_setting_updated", "enabled", payload.Enabled)
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": payload.Enabled})
+	case request.URL.Path == controlPrefix+"/api/key" && request.Method == http.MethodPut:
+		var payload struct {
+			KeyHash string `json:"key_hash"`
+			Enabled bool   `json:"enabled"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, 4096)).Decode(&payload); err != nil || payload.KeyHash == "" {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if err := p.keyRegistry.Set(payload.KeyHash, payload.Enabled); err != nil {
+			http.Error(w, "Failed to persist key policy", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": payload.Enabled})
+	case request.URL.Path == controlPrefix+"/api/keys" && request.Method == http.MethodPut:
+		var payload struct {
+			KeyHashes []string `json:"key_hashes"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, request.Body, 4*1024*1024)).Decode(&payload); err != nil {
+			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if err := p.keyRegistry.Replace(payload.KeyHashes); err != nil {
+			http.Error(w, "Failed to persist key registry", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"key_count": len(payload.KeyHashes)})
 	default:
 		if strings.HasPrefix(request.URL.Path, controlPrefix+"/api/") {
 			http.Error(w, "Not Found", http.StatusNotFound)

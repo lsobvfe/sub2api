@@ -1,7 +1,7 @@
 [Unit]
 Description=Sub2API Independent Stream Hold Proxy
-After=network-online.target sub2api-source.service
-Requires=sub2api-source.service
+After=network-online.target
+Before=sub2api-source.service
 
 [Service]
 Type=simple

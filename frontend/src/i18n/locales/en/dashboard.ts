@@ -104,6 +104,8 @@ export default {
     selectGroup: 'Select a group',
     statusLabel: 'Status',
     selectStatus: 'Select status',
+    streamHoldProxy: 'Use Hold Proxy',
+    streamHoldProxyHint: 'Route streaming requests through the local Hold Proxy for retry protection.',
     saving: 'Saving...',
     noKeysYet: 'No API keys yet',
     createFirstKey: 'Create your first API key to get started with the API.',

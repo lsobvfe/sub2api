@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"os"
 	"time"
 
@@ -810,11 +811,20 @@ func ProvideAPIKeyService(
 	cfg *config.Config,
 	billingCacheService *BillingCacheService,
 	concurrencyService *ConcurrencyService,
+	streamHoldHook StreamHoldHook,
 ) *APIKeyService {
 	svc := NewAPIKeyService(apiKeyRepo, userRepo, groupRepo, userSubRepo, userGroupRateRepo, cache, cfg)
 	svc.SetRateLimitCacheInvalidator(billingCacheService)
 	svc.SetConcurrencyService(concurrencyService)
+	svc.SetStreamHoldHook(streamHoldHook)
+	if err := svc.SyncStreamHoldHook(context.Background()); err != nil {
+		slog.Warn("stream_hold_initial_sync_failed", "error", err)
+	}
 	return svc
+}
+
+func ProvideStreamHoldHook() StreamHoldHook {
+	return NewLocalStreamHoldHook()
 }
 
 // ProviderSet is the Wire provider set for all services
@@ -824,6 +834,7 @@ var ProviderSet = wire.NewSet(
 	NewPasskeyService,
 	NewUserService,
 	ProvideAPIKeyService,
+	ProvideStreamHoldHook,
 	ProvideAPIKeyAuthCacheInvalidator,
 	ProvideAuthCacheInvalidationWorker,
 	NewGroupService,
