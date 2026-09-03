@@ -15,6 +15,17 @@ const (
 	terminalFailure
 )
 
+func (k terminalKind) String() string {
+	switch k {
+	case terminalSuccess:
+		return "success"
+	case terminalFailure:
+		return "failure"
+	default:
+		return "none"
+	}
+}
+
 type terminalEvent struct {
 	Kind    terminalKind
 	Type    string
@@ -115,9 +126,6 @@ func (d *sseDecoder) finishEvent() terminalEvent {
 
 func classifySSEEvent(eventName, data string) terminalEvent {
 	trimmedData := strings.TrimSpace(data)
-	if trimmedData == "[DONE]" {
-		return terminalEvent{Kind: terminalSuccess, Type: "[DONE]"}
-	}
 
 	payloadType := ""
 	message := ""
@@ -137,7 +145,7 @@ func classifySSEEvent(eventName, data string) terminalEvent {
 
 	eventType := strings.ToLower(strings.TrimSpace(firstString(payloadType, eventName)))
 	switch eventType {
-	case "response.completed":
+	case "response.completed", "message_stop":
 		return terminalEvent{Kind: terminalSuccess, Type: eventType}
 	case "response.failed", "response.incomplete", "response.cancelled", "error":
 		return terminalEvent{Kind: terminalFailure, Type: eventType, Message: message}

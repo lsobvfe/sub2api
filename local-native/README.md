@@ -22,7 +22,7 @@ local-native/extensions/stream-hold-proxy/
 
 1. 完整复制客户端请求并发给 Sub2API。
 2. 将该次 SSE 写入临时 spool，同时解析终止事件。
-3. 只有看到 `response.completed`（或 `[DONE]`）才向客户端回放。
+3. 只有看到原生终止事件 `response.completed` 或 `message_stop` 才向客户端回放。
 4. HTTP 错误、传输错误、`response.failed`、`response.incomplete`、无终止 EOF、流空闲和单次尝试超时全部丢弃并重试。
 5. 总等待时间不限；客户端取消后立即停止。
 6. 等待期间向客户端发送可解析但无业务输出的 SSE keepalive 事件，持续重置客户端 idle timeout。

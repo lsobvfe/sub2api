@@ -32,66 +32,86 @@ type Config struct {
 }
 
 func LoadConfig() (Config, error) {
-	upstreamURL, err := url.Parse(envString("STREAM_HOLD_UPSTREAM_URL", "http://127.0.0.1:18082"))
+	listenAddr, err := requiredEnvString("STREAM_HOLD_LISTEN_ADDR")
+	if err != nil {
+		return Config{}, err
+	}
+	upstreamValue, err := requiredEnvString("STREAM_HOLD_UPSTREAM_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	upstreamURL, err := url.Parse(upstreamValue)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse STREAM_HOLD_UPSTREAM_URL: %w", err)
 	}
-	enabled, err := envBool("STREAM_HOLD_ENABLED", true)
+	protectedPathsValue, err := requiredEnvString("STREAM_HOLD_PATHS")
 	if err != nil {
 		return Config{}, err
 	}
-	keepaliveInterval, err := envDuration("STREAM_HOLD_KEEPALIVE_INTERVAL", 5*time.Second)
+	enabled, err := envBool("STREAM_HOLD_ENABLED")
 	if err != nil {
 		return Config{}, err
 	}
-	retryMinInterval, err := envDuration("STREAM_HOLD_RETRY_MIN_INTERVAL", 500*time.Millisecond)
+	stateFile, err := requiredEnvString("STREAM_HOLD_STATE_FILE")
 	if err != nil {
 		return Config{}, err
 	}
-	retryMaxInterval, err := envDuration("STREAM_HOLD_RETRY_MAX_INTERVAL", 10*time.Second)
+	spoolDir, err := requiredEnvString("STREAM_HOLD_SPOOL_DIR")
 	if err != nil {
 		return Config{}, err
 	}
-	retryJitterRatio, err := envFloat("STREAM_HOLD_RETRY_JITTER_RATIO", 0.2)
+	keepaliveInterval, err := envDuration("STREAM_HOLD_KEEPALIVE_INTERVAL")
 	if err != nil {
 		return Config{}, err
 	}
-	responseHeaderTimeout, err := envDuration("STREAM_HOLD_RESPONSE_HEADER_TIMEOUT", 2*time.Minute)
+	retryMinInterval, err := envDuration("STREAM_HOLD_RETRY_MIN_INTERVAL")
 	if err != nil {
 		return Config{}, err
 	}
-	streamIdleTimeout, err := envDuration("STREAM_HOLD_STREAM_IDLE_TIMEOUT", 90*time.Second)
+	retryMaxInterval, err := envDuration("STREAM_HOLD_RETRY_MAX_INTERVAL")
 	if err != nil {
 		return Config{}, err
 	}
-	attemptMaxDuration, err := envDuration("STREAM_HOLD_ATTEMPT_MAX_DURATION", 15*time.Minute)
+	retryJitterRatio, err := envFloat("STREAM_HOLD_RETRY_JITTER_RATIO")
 	if err != nil {
 		return Config{}, err
 	}
-	maxRequestBodyBytes, err := envInt64("STREAM_HOLD_MAX_REQUEST_BODY_BYTES", 64*1024*1024)
+	responseHeaderTimeout, err := envDuration("STREAM_HOLD_RESPONSE_HEADER_TIMEOUT")
 	if err != nil {
 		return Config{}, err
 	}
-	maxAttemptBodyBytes, err := envInt64("STREAM_HOLD_MAX_ATTEMPT_BODY_BYTES", 512*1024*1024)
+	streamIdleTimeout, err := envDuration("STREAM_HOLD_STREAM_IDLE_TIMEOUT")
 	if err != nil {
 		return Config{}, err
 	}
-	maxSSELineBytes, err := envInt("STREAM_HOLD_MAX_SSE_LINE_BYTES", 16*1024*1024)
+	attemptMaxDuration, err := envDuration("STREAM_HOLD_ATTEMPT_MAX_DURATION")
 	if err != nil {
 		return Config{}, err
 	}
-	maxIdleConnsPerHost, err := envInt("STREAM_HOLD_MAX_IDLE_CONNS_PER_HOST", 256)
+	maxRequestBodyBytes, err := envInt64("STREAM_HOLD_MAX_REQUEST_BODY_BYTES")
+	if err != nil {
+		return Config{}, err
+	}
+	maxAttemptBodyBytes, err := envInt64("STREAM_HOLD_MAX_ATTEMPT_BODY_BYTES")
+	if err != nil {
+		return Config{}, err
+	}
+	maxSSELineBytes, err := envInt("STREAM_HOLD_MAX_SSE_LINE_BYTES")
+	if err != nil {
+		return Config{}, err
+	}
+	maxIdleConnsPerHost, err := envInt("STREAM_HOLD_MAX_IDLE_CONNS_PER_HOST")
 	if err != nil {
 		return Config{}, err
 	}
 
 	cfg := Config{
-		ListenAddr:            envString("STREAM_HOLD_LISTEN_ADDR", "0.0.0.0:18081"),
+		ListenAddr:            listenAddr,
 		UpstreamURL:           upstreamURL,
-		ProtectedPaths:        splitPaths(envString("STREAM_HOLD_PATHS", "/responses,/v1/responses")),
+		ProtectedPaths:        splitPaths(protectedPathsValue),
 		Enabled:               enabled,
-		StateFile:             envString("STREAM_HOLD_STATE_FILE", "./stream-hold-proxy-state.json"),
-		SpoolDir:              envString("STREAM_HOLD_SPOOL_DIR", "./stream-hold-spool"),
+		StateFile:             stateFile,
+		SpoolDir:              spoolDir,
 		KeepaliveInterval:     keepaliveInterval,
 		RetryMinInterval:      retryMinInterval,
 		RetryMaxInterval:      retryMaxInterval,
@@ -181,63 +201,64 @@ func splitPaths(value string) []string {
 	return paths
 }
 
-func envString(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return strings.TrimSpace(value)
-	}
-	return fallback
-}
-
-func envBool(key string, fallback bool) (bool, error) {
+func requiredEnvString(key string) (string, error) {
 	value, ok := os.LookupEnv(key)
 	if !ok || strings.TrimSpace(value) == "" {
-		return fallback, nil
+		return "", fmt.Errorf("%s is required", key)
 	}
-	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	return strings.TrimSpace(value), nil
+}
+
+func envBool(key string) (bool, error) {
+	value, err := requiredEnvString(key)
+	if err != nil {
+		return false, err
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return false, fmt.Errorf("%s must be a boolean: %w", key, err)
 	}
 	return parsed, nil
 }
 
-func envDuration(key string, fallback time.Duration) (time.Duration, error) {
-	value, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(value) == "" {
-		return fallback, nil
+func envDuration(key string) (time.Duration, error) {
+	value, err := requiredEnvString(key)
+	if err != nil {
+		return 0, err
 	}
-	parsed, err := time.ParseDuration(strings.TrimSpace(value))
+	parsed, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be a duration: %w", key, err)
 	}
 	return parsed, nil
 }
 
-func envFloat(key string, fallback float64) (float64, error) {
-	value, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(value) == "" {
-		return fallback, nil
+func envFloat(key string) (float64, error) {
+	value, err := requiredEnvString(key)
+	if err != nil {
+		return 0, err
 	}
-	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be a number: %w", key, err)
 	}
 	return parsed, nil
 }
 
-func envInt64(key string, fallback int64) (int64, error) {
-	value, ok := os.LookupEnv(key)
-	if !ok || strings.TrimSpace(value) == "" {
-		return fallback, nil
+func envInt64(key string) (int64, error) {
+	value, err := requiredEnvString(key)
+	if err != nil {
+		return 0, err
 	}
-	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
 	}
 	return parsed, nil
 }
 
-func envInt(key string, fallback int) (int, error) {
-	value, err := envInt64(key, int64(fallback))
+func envInt(key string) (int, error) {
+	value, err := envInt64(key)
 	if err != nil {
 		return 0, err
 	}

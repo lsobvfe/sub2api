@@ -3,6 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -14,6 +16,8 @@ import (
 	"testing"
 	"time"
 )
+
+const testAPIKey = "test-stream-hold-key"
 
 func TestProxyRetriesHTTPErrorWithoutExposingIt(t *testing.T) {
 	var attempts atomic.Int32
@@ -66,6 +70,52 @@ func TestProxyRetriesResponseFailedWithoutExposingIt(t *testing.T) {
 	if !strings.Contains(body, "recovered") {
 		t.Fatalf("successful attempt missing: %s", body)
 	}
+}
+
+func TestProxyLogsResponseFailedTerminal(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts.Add(1) == 1 {
+			_, _ = io.WriteString(w,
+				"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity.\"}}}\n\n",
+			)
+			return
+		}
+		writeCompletedStream(w, "recovered")
+	}))
+	defer upstream.Close()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	body, _ := makeHeldRequest(t, newTestProxyWithLogger(t, upstream.URL, true, logger))
+	if !strings.Contains(body, "recovered") {
+		t.Fatalf("successful response missing: %s", body)
+	}
+
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode log record: %v", err)
+		}
+		if record["msg"] != "hold_attempt_finished" || record["attempt"] != float64(1) {
+			continue
+		}
+		if record["outcome"] != "failure" {
+			t.Fatalf("outcome = %v, want failure", record["outcome"])
+		}
+		if record["terminal_outcome"] != "failure" {
+			t.Fatalf("terminal_outcome = %v, want failure", record["terminal_outcome"])
+		}
+		if record["terminal_type"] != "response.failed" {
+			t.Fatalf("terminal_type = %v, want response.failed", record["terminal_type"])
+		}
+		if record["failure_class"] != "sse_terminal_failure" {
+			t.Fatalf("failure_class = %v, want sse_terminal_failure", record["failure_class"])
+		}
+		return
+	}
+	t.Fatal("response.failed terminal diagnostic log missing")
 }
 
 func TestProxyRetriesErrorEventWithoutExposingIt(t *testing.T) {
@@ -142,6 +192,59 @@ func TestProxyRetriesStreamWithoutTerminalEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, "kept") {
 		t.Fatalf("successful response missing: %s", body)
+	}
+}
+
+func TestProxyHoldsAnthropicMessagesStream(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w,
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test\"}}\n\n"+
+				"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"+
+				"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"+
+				"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		)
+	}))
+	defer upstream.Close()
+
+	handler := newTestProxy(t, upstream.URL, true)
+	handler.cfg.ProtectedPaths = []string{"/v1/messages"}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	request, err := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/v1/messages",
+		strings.NewReader(`{"model":"claude-test","stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+testAPIKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", response.StatusCode, body)
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+	if !strings.Contains(string(body), "event: message_stop") {
+		t.Fatalf("Anthropic terminal event missing: %s", body)
+	}
+	if !strings.Contains(string(body), "hello") {
+		t.Fatalf("Anthropic content missing: %s", body)
 	}
 }
 
@@ -240,6 +343,7 @@ func TestClientCancellationStopsRetryLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	request.Header.Set("Authorization", "Bearer "+testAPIKey)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -260,6 +364,11 @@ func TestClientCancellationStopsRetryLoop(t *testing.T) {
 }
 
 func newTestProxy(t *testing.T, upstreamURL string, enabled bool) *Proxy {
+	t.Helper()
+	return newTestProxyWithLogger(t, upstreamURL, enabled, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func newTestProxyWithLogger(t *testing.T, upstreamURL string, enabled bool, logger *slog.Logger) *Proxy {
 	t.Helper()
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
@@ -285,9 +394,12 @@ func newTestProxy(t *testing.T, upstreamURL string, enabled bool) *Proxy {
 		MaxSSELineBytes:       64 * 1024,
 		MaxIdleConnsPerHost:   16,
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	handler, err := New(cfg, logger)
 	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(testAPIKey))
+	if err := handler.keyRegistry.Set(hex.EncodeToString(sum[:]), true); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(handler.Close)
@@ -299,11 +411,17 @@ func makeHeldRequest(t *testing.T, handler http.Handler) (string, int) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	response, err := http.Post(
+	request, err := http.NewRequest(
+		http.MethodPost,
 		server.URL+"/responses",
-		"application/json",
 		bytes.NewBufferString(`{"model":"gpt-test","stream":true}`),
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+testAPIKey)
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}

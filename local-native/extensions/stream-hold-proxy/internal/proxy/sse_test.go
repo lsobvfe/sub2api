@@ -13,6 +13,28 @@ func TestSSEDecoderRecognizesCompletedResponse(t *testing.T) {
 	}
 }
 
+func TestSSEDecoderRecognizesAnthropicMessageStop(t *testing.T) {
+	decoder := newSSEDecoder(1024)
+	event, err := decoder.Feed([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != terminalSuccess {
+		t.Fatalf("kind = %v, want terminalSuccess", event.Kind)
+	}
+}
+
+func TestSSEDecoderDoesNotTreatLegacyDoneAsSuccess(t *testing.T) {
+	decoder := newSSEDecoder(1024)
+	event, err := decoder.Feed([]byte("data: [DONE]\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind == terminalSuccess {
+		t.Fatal("legacy [DONE] marker must not complete a native stream")
+	}
+}
+
 func TestSSEDecoderRecognizesCapacityFailureMessage(t *testing.T) {
 	decoder := newSSEDecoder(4096)
 	event, err := decoder.Feed([]byte(

@@ -38,7 +38,7 @@ func New(cfg Config, logger *slog.Logger) (*Proxy, error) {
 		return nil, err
 	}
 	if logger == nil {
-		logger = slog.Default()
+		return nil, fmt.Errorf("logger is required")
 	}
 	controller, err := newEnableController(cfg.Enabled, cfg.StateFile)
 	if err != nil {
@@ -117,7 +117,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 }
 
 func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, body []byte) {
-	requestID := newLeaseIdentity()
+	requestID, err := newLeaseIdentity()
+	if err != nil {
+		p.logger.Error("hold_request_initialization_failed",
+			"method", request.Method,
+			"path", request.URL.Path,
+			"error", err,
+		)
+		http.Error(w, "stream hold request initialization failed", http.StatusInternalServerError)
+		return
+	}
 	clientRequestID := clientRequestIdentity(request)
 	startedAt := time.Now()
 	p.registry.start(requestID, clientRequestID, request.Method, request.URL.Path, startedAt)
@@ -172,6 +181,7 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 			p.logClientCancellation(requestID, clientRequestID, attempt, startedAt, request.Context().Err())
 			return
 		}
+		p.logAttemptFinished(requestID, clientRequestID, attempt, result)
 		if result.successful() {
 			if err := replaySpool(w, controller, result.SpoolPath); err != nil {
 				_ = os.Remove(result.SpoolPath)
@@ -215,6 +225,26 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 			return
 		}
 	}
+}
+
+func (p *Proxy) logAttemptFinished(requestID, clientRequestID string, attempt int, result attemptResult) {
+	outcome := "failure"
+	if result.successful() {
+		outcome = "success"
+	}
+	p.logger.Info("hold_attempt_finished",
+		"request_id", requestID,
+		"client_request_id", clientRequestID,
+		"attempt", attempt,
+		"outcome", outcome,
+		"upstream_status", result.Status,
+		"upstream_request_id", result.UpstreamRequestID,
+		"attempt_duration_ms", result.Duration.Milliseconds(),
+		"response_bytes", result.Bytes,
+		"terminal_outcome", result.TerminalOutcome,
+		"terminal_type", result.TerminalType,
+		"failure_class", result.FailureClass,
+	)
 }
 
 func (p *Proxy) waitForAttempt(
@@ -308,16 +338,7 @@ func (p *Proxy) logClientCancellation(requestID, clientRequestID string, attempt
 }
 
 func writeKeepalive(w http.ResponseWriter, controller *http.ResponseController, phase string) error {
-	payload, err := json.Marshal(map[string]any{
-		"type": "response.metadata",
-		"stream_hold": map[string]string{
-			"phase": phase,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+	if _, err := fmt.Fprintf(w, ": stream-hold %s\n\n", phase); err != nil {
 		return err
 	}
 	return controller.Flush()
@@ -385,12 +406,12 @@ func clientRequestIdentity(request *http.Request) string {
 	return ""
 }
 
-func newLeaseIdentity() string {
+func newLeaseIdentity() (string, error) {
 	randomBytes := make([]byte, 12)
-	if _, err := rand.Read(randomBytes); err == nil {
-		return hex.EncodeToString(randomBytes)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("generate request id: %w", err)
 	}
-	return fmt.Sprintf("hold-%d", time.Now().UnixNano())
+	return hex.EncodeToString(randomBytes), nil
 }
 
 func noRedirect(_ *http.Request, _ []*http.Request) error {

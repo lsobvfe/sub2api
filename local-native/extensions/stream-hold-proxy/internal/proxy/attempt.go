@@ -19,6 +19,9 @@ type attemptResult struct {
 	Bytes             int64
 	Status            int
 	Message           string
+	FailureClass      string
+	TerminalOutcome   string
+	TerminalType      string
 	UpstreamRequestID string
 	Duration          time.Duration
 }
@@ -45,14 +48,14 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return failedAttempt(0, fmt.Sprintf("build upstream request: %v", err), "", startedAt)
+		return failedAttempt(0, "build_upstream_request", fmt.Sprintf("build upstream request: %v", err), "", startedAt)
 	}
 	copyRequestHeaders(request.Header, source.Header)
 	request.Host = p.cfg.UpstreamURL.Host
 
 	response, err := p.client.Do(request)
 	if err != nil {
-		return failedAttempt(0, fmt.Sprintf("upstream transport: %v", err), "", startedAt)
+		return failedAttempt(0, "upstream_transport", fmt.Sprintf("upstream transport: %v", err), "", startedAt)
 	}
 	defer response.Body.Close()
 
@@ -65,15 +68,15 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 		if message == "" {
 			message = response.Status
 		}
-		return failedAttempt(response.StatusCode, message, upstreamRequestID, startedAt)
+		return failedAttempt(response.StatusCode, "upstream_http_status", message, upstreamRequestID, startedAt)
 	}
 
 	if err := os.MkdirAll(p.cfg.SpoolDir, 0o700); err != nil {
-		return failedAttempt(response.StatusCode, fmt.Sprintf("create spool directory: %v", err), upstreamRequestID, startedAt)
+		return failedAttempt(response.StatusCode, "spool_directory", fmt.Sprintf("create spool directory: %v", err), upstreamRequestID, startedAt)
 	}
 	spool, err := os.CreateTemp(p.cfg.SpoolDir, "attempt-*.sse")
 	if err != nil {
-		return failedAttempt(response.StatusCode, fmt.Sprintf("create attempt spool: %v", err), upstreamRequestID, startedAt)
+		return failedAttempt(response.StatusCode, "spool_create", fmt.Sprintf("create attempt spool: %v", err), upstreamRequestID, startedAt)
 	}
 	spoolPath := spool.Name()
 	keepSpool := false
@@ -98,15 +101,24 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 		select {
 		case <-attemptCtx.Done():
 			_ = response.Body.Close()
-			return failedAttempt(response.StatusCode, attemptContextMessage(attemptCtx), upstreamRequestID, startedAt)
+			return annotateAttempt(
+				failedAttempt(response.StatusCode, "attempt_context", attemptContextMessage(attemptCtx), upstreamRequestID, startedAt),
+				written,
+				terminalEvent{},
+			)
 		case <-idleTimer.C:
 			cancelRead()
 			_ = response.Body.Close()
-			return failedAttempt(
-				response.StatusCode,
-				fmt.Sprintf("upstream stream idle for %s", p.cfg.StreamIdleTimeout),
-				upstreamRequestID,
-				startedAt,
+			return annotateAttempt(
+				failedAttempt(
+					response.StatusCode,
+					"upstream_stream_idle",
+					fmt.Sprintf("upstream stream idle for %s", p.cfg.StreamIdleTimeout),
+					upstreamRequestID,
+					startedAt,
+				),
+				written,
+				terminalEvent{},
 			)
 		case line := <-lines:
 			if len(line.raw) > 0 {
@@ -114,39 +126,62 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 				if written > p.cfg.MaxAttemptBodyBytes {
 					cancelRead()
 					_ = response.Body.Close()
-					return failedAttempt(
-						response.StatusCode,
-						fmt.Sprintf("upstream stream exceeds %d bytes", p.cfg.MaxAttemptBodyBytes),
-						upstreamRequestID,
-						startedAt,
+					return annotateAttempt(
+						failedAttempt(
+							response.StatusCode,
+							"upstream_stream_size_limit",
+							fmt.Sprintf("upstream stream exceeds %d bytes", p.cfg.MaxAttemptBodyBytes),
+							upstreamRequestID,
+							startedAt,
+						),
+						written,
+						terminalEvent{},
 					)
 				}
 				if _, err := spool.Write(line.raw); err != nil {
 					cancelRead()
 					_ = response.Body.Close()
-					return failedAttempt(response.StatusCode, fmt.Sprintf("write attempt spool: %v", err), upstreamRequestID, startedAt)
+					return annotateAttempt(
+						failedAttempt(response.StatusCode, "spool_write", fmt.Sprintf("write attempt spool: %v", err), upstreamRequestID, startedAt),
+						written,
+						terminalEvent{},
+					)
 				}
 				terminal, err := decoder.Feed(line.raw)
 				if err != nil {
 					cancelRead()
 					_ = response.Body.Close()
-					return failedAttempt(response.StatusCode, err.Error(), upstreamRequestID, startedAt)
+					return annotateAttempt(
+						failedAttempt(response.StatusCode, "sse_decode", err.Error(), upstreamRequestID, startedAt),
+						written,
+						terminalEvent{},
+					)
 				}
 				switch terminal.Kind {
 				case terminalSuccess:
 					cancelRead()
 					_ = response.Body.Close()
 					if err := spool.Sync(); err != nil {
-						return failedAttempt(response.StatusCode, fmt.Sprintf("sync attempt spool: %v", err), upstreamRequestID, startedAt)
+						return annotateAttempt(
+							failedAttempt(response.StatusCode, "spool_sync", fmt.Sprintf("sync attempt spool: %v", err), upstreamRequestID, startedAt),
+							written,
+							terminal,
+						)
 					}
 					if err := spool.Close(); err != nil {
-						return failedAttempt(response.StatusCode, fmt.Sprintf("close attempt spool: %v", err), upstreamRequestID, startedAt)
+						return annotateAttempt(
+							failedAttempt(response.StatusCode, "spool_close", fmt.Sprintf("close attempt spool: %v", err), upstreamRequestID, startedAt),
+							written,
+							terminal,
+						)
 					}
 					keepSpool = true
 					return attemptResult{
 						SpoolPath:         spoolPath,
 						Bytes:             written,
 						Status:            response.StatusCode,
+						TerminalOutcome:   terminal.Kind.String(),
+						TerminalType:      terminal.Type,
 						UpstreamRequestID: upstreamRequestID,
 						Duration:          time.Since(startedAt),
 					}
@@ -154,7 +189,11 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 					cancelRead()
 					_ = response.Body.Close()
 					message := firstString(terminal.Message, terminal.Type, "upstream stream failed")
-					return failedAttempt(response.StatusCode, message, upstreamRequestID, startedAt)
+					return annotateAttempt(
+						failedAttempt(response.StatusCode, "sse_terminal_failure", message, upstreamRequestID, startedAt),
+						written,
+						terminal,
+					)
 				}
 				resetTimer(idleTimer, p.cfg.StreamIdleTimeout)
 			}
@@ -162,37 +201,70 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 				continue
 			}
 			if !errors.Is(line.err, io.EOF) {
-				return failedAttempt(response.StatusCode, fmt.Sprintf("read upstream stream: %v", line.err), upstreamRequestID, startedAt)
+				return annotateAttempt(
+					failedAttempt(response.StatusCode, "upstream_stream_read", fmt.Sprintf("read upstream stream: %v", line.err), upstreamRequestID, startedAt),
+					written,
+					terminalEvent{},
+				)
 			}
 			terminal, err := decoder.Finish()
 			if err != nil {
-				return failedAttempt(response.StatusCode, err.Error(), upstreamRequestID, startedAt)
+				return annotateAttempt(
+					failedAttempt(response.StatusCode, "sse_decode", err.Error(), upstreamRequestID, startedAt),
+					written,
+					terminalEvent{},
+				)
 			}
 			if terminal.Kind == terminalSuccess {
 				if err := spool.Sync(); err != nil {
-					return failedAttempt(response.StatusCode, fmt.Sprintf("sync attempt spool: %v", err), upstreamRequestID, startedAt)
+					return annotateAttempt(
+						failedAttempt(response.StatusCode, "spool_sync", fmt.Sprintf("sync attempt spool: %v", err), upstreamRequestID, startedAt),
+						written,
+						terminal,
+					)
 				}
 				if err := spool.Close(); err != nil {
-					return failedAttempt(response.StatusCode, fmt.Sprintf("close attempt spool: %v", err), upstreamRequestID, startedAt)
+					return annotateAttempt(
+						failedAttempt(response.StatusCode, "spool_close", fmt.Sprintf("close attempt spool: %v", err), upstreamRequestID, startedAt),
+						written,
+						terminal,
+					)
 				}
 				keepSpool = true
 				return attemptResult{
 					SpoolPath:         spoolPath,
 					Bytes:             written,
 					Status:            response.StatusCode,
+					TerminalOutcome:   terminal.Kind.String(),
+					TerminalType:      terminal.Type,
 					UpstreamRequestID: upstreamRequestID,
 					Duration:          time.Since(startedAt),
 				}
 			}
 			if terminal.Kind == terminalFailure {
-				return failedAttempt(
-					response.StatusCode,
-					firstString(terminal.Message, terminal.Type, "upstream stream failed"),
-					upstreamRequestID,
-					startedAt,
+				return annotateAttempt(
+					failedAttempt(
+						response.StatusCode,
+						"sse_terminal_failure",
+						firstString(terminal.Message, terminal.Type, "upstream stream failed"),
+						upstreamRequestID,
+						startedAt,
+					),
+					written,
+					terminal,
 				)
 			}
-			return failedAttempt(response.StatusCode, "upstream stream ended without a successful terminal event", upstreamRequestID, startedAt)
+			return annotateAttempt(
+				failedAttempt(
+					response.StatusCode,
+					"upstream_missing_terminal",
+					"upstream stream ended without a successful terminal event",
+					upstreamRequestID,
+					startedAt,
+				),
+				written,
+				terminal,
+			)
 		}
 	}
 }
@@ -263,13 +335,21 @@ func readErrorSnippet(ctx context.Context, body io.ReadCloser, timeout time.Dura
 	}
 }
 
-func failedAttempt(status int, message, requestID string, startedAt time.Time) attemptResult {
+func failedAttempt(status int, failureClass, message, requestID string, startedAt time.Time) attemptResult {
 	return attemptResult{
 		Status:            status,
 		Message:           strings.TrimSpace(message),
+		FailureClass:      failureClass,
 		UpstreamRequestID: requestID,
 		Duration:          time.Since(startedAt),
 	}
+}
+
+func annotateAttempt(result attemptResult, bytes int64, terminal terminalEvent) attemptResult {
+	result.Bytes = bytes
+	result.TerminalOutcome = terminal.Kind.String()
+	result.TerminalType = terminal.Type
+	return result
 }
 
 func attemptContextMessage(ctx context.Context) string {

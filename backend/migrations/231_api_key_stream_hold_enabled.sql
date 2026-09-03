@@ -1,0 +1,2 @@
+ALTER TABLE api_keys
+    ADD COLUMN IF NOT EXISTS stream_hold_enabled BOOLEAN NOT NULL DEFAULT TRUE;
