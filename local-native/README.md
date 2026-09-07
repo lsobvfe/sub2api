@@ -22,12 +22,14 @@ local-native/extensions/stream-hold-proxy/
 
 1. 完整复制客户端请求并发给 Sub2API。
 2. 将该次 SSE 写入临时 spool，同时解析终止事件。
-3. 只有看到原生终止事件 `response.completed` 或 `message_stop` 才向客户端回放。
+3. 只有看到该协议的原生终止事件才向客户端回放：Responses 的 `response.completed`、Messages 的 `message_stop`、Chat Completions 的 `data: [DONE]`。
 4. HTTP 错误、传输错误、`response.failed`、`response.incomplete`、无终止 EOF、流空闲和单次尝试超时全部丢弃并重试。
 5. 总等待时间不限；客户端取消后立即停止。
-6. 等待期间向客户端发送可解析但无业务输出的 SSE keepalive 事件，持续重置客户端 idle timeout。
+6. 等待期间仅发送该协议允许的 SSE keepalive：Responses 使用 `response.metadata`，Messages 和 Chat Completions 使用 SSE 注释帧；不会跨协议注入业务事件。
 
 这意味着失败尝试即使已经生成部分 token，也不会把半截内容或错误泄露给客户端。
+
+`STREAM_HOLD_PATHS` 只能选择已定义协议契约的路径：`/responses`、`/v1/responses`、`/v1/messages`、`/v1/chat/completions`。未知路径会在启动时拒绝，不能以通用代理模式接管。
 
 ## 运行文件
 

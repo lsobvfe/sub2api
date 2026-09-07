@@ -11,6 +11,7 @@ type holdSnapshot struct {
 	ClientRequestID string     `json:"client_request_id,omitempty"`
 	Method          string     `json:"method"`
 	Path            string     `json:"path"`
+	Protocol        string     `json:"protocol"`
 	StartedAt       time.Time  `json:"started_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	Attempts        int        `json:"attempts"`
@@ -29,7 +30,7 @@ func newHoldRegistry() *holdRegistry {
 	return &holdRegistry{active: make(map[string]holdSnapshot)}
 }
 
-func (r *holdRegistry) start(requestID, clientRequestID, method, path string, now time.Time) {
+func (r *holdRegistry) start(requestID, clientRequestID, method, path string, protocol streamProtocol, now time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.active[requestID] = holdSnapshot{
@@ -37,6 +38,7 @@ func (r *holdRegistry) start(requestID, clientRequestID, method, path string, no
 		ClientRequestID: clientRequestID,
 		Method:          method,
 		Path:            path,
+		Protocol:        protocol.String(),
 		StartedAt:       now.UTC(),
 		UpdatedAt:       now.UTC(),
 		Phase:           "starting",

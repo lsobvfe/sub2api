@@ -35,7 +35,7 @@ type lineResult struct {
 	err error
 }
 
-func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body []byte) attemptResult {
+func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body []byte, protocol streamProtocol) attemptResult {
 	startedAt := time.Now()
 	attemptCtx, cancel := context.WithTimeout(ctx, p.cfg.AttemptMaxDuration)
 	defer cancel()
@@ -87,7 +87,7 @@ func (p *Proxy) performAttempt(ctx context.Context, source *http.Request, body [
 		}
 	}()
 
-	decoder := newSSEDecoder(p.cfg.MaxSSELineBytes)
+	decoder := newSSEDecoder(protocol, p.cfg.MaxSSELineBytes)
 	readCtx, cancelRead := context.WithCancel(attemptCtx)
 	defer cancelRead()
 	lines := make(chan lineResult, 1)

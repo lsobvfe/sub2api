@@ -94,7 +94,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		p.serveControl(w, request)
 		return
 	}
-	if !p.controller.Enabled() || request.Method != http.MethodPost || !p.cfg.protects(request.URL.Path) {
+	if !p.controller.Enabled() || request.Method != http.MethodPost {
+		p.reverse.ServeHTTP(w, request)
+		return
+	}
+	protocol, protected := p.cfg.protocolForPath(request.URL.Path)
+	if !protected {
 		p.reverse.ServeHTTP(w, request)
 		return
 	}
@@ -113,15 +118,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 		p.reverse.ServeHTTP(w, request)
 		return
 	}
-	p.serveHeldStream(w, request, body)
+	p.serveHeldStream(w, request, body, protocol)
 }
 
-func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, body []byte) {
+func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, body []byte, protocol streamProtocol) {
 	requestID, err := newLeaseIdentity()
 	if err != nil {
 		p.logger.Error("hold_request_initialization_failed",
 			"method", request.Method,
 			"path", request.URL.Path,
+			"protocol", protocol,
 			"error", err,
 		)
 		http.Error(w, "stream hold request initialization failed", http.StatusInternalServerError)
@@ -129,7 +135,7 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 	}
 	clientRequestID := clientRequestIdentity(request)
 	startedAt := time.Now()
-	p.registry.start(requestID, clientRequestID, request.Method, request.URL.Path, startedAt)
+	p.registry.start(requestID, clientRequestID, request.Method, request.URL.Path, protocol, startedAt)
 	defer p.registry.finish(requestID)
 
 	p.logger.Info("hold_request_started",
@@ -137,6 +143,7 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 		"client_request_id", clientRequestID,
 		"method", request.Method,
 		"path", request.URL.Path,
+		"protocol", protocol,
 	)
 
 	header := w.Header()
@@ -149,10 +156,11 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 
 	controller := http.NewResponseController(w)
 	_ = controller.EnableFullDuplex()
-	if err := writeKeepalive(w, controller, "connected"); err != nil {
+	if err := protocol.writeKeepalive(w, controller, "connected"); err != nil {
 		p.logger.Info("hold_client_disconnected",
 			"request_id", requestID,
 			"client_request_id", clientRequestID,
+			"protocol", protocol,
 			"attempts", 0,
 			"held_for", time.Since(startedAt).String(),
 			"error", err,
@@ -165,7 +173,7 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 
 	for attempt := 1; ; attempt++ {
 		if request.Context().Err() != nil {
-			p.logClientCancellation(requestID, clientRequestID, attempt-1, startedAt, request.Context().Err())
+			p.logClientCancellation(requestID, clientRequestID, protocol, attempt-1, startedAt, request.Context().Err())
 			return
 		}
 		p.registry.attempt(requestID, attempt, time.Now())
@@ -174,20 +182,22 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 			"client_request_id", clientRequestID,
 			"attempt", attempt,
 			"path", request.URL.Path,
+			"protocol", protocol,
 		)
 
-		result, connected := p.waitForAttempt(w, controller, keepaliveTicker, request, body)
+		result, connected := p.waitForAttempt(w, controller, keepaliveTicker, request, body, protocol)
 		if !connected {
-			p.logClientCancellation(requestID, clientRequestID, attempt, startedAt, request.Context().Err())
+			p.logClientCancellation(requestID, clientRequestID, protocol, attempt, startedAt, request.Context().Err())
 			return
 		}
-		p.logAttemptFinished(requestID, clientRequestID, attempt, result)
+		p.logAttemptFinished(requestID, clientRequestID, protocol, attempt, result)
 		if result.successful() {
 			if err := replaySpool(w, controller, result.SpoolPath); err != nil {
 				_ = os.Remove(result.SpoolPath)
 				p.logger.Info("hold_client_disconnected",
 					"request_id", requestID,
 					"client_request_id", clientRequestID,
+					"protocol", protocol,
 					"attempts", attempt,
 					"held_for", time.Since(startedAt).String(),
 					"error", err,
@@ -199,6 +209,7 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 				"request_id", requestID,
 				"client_request_id", clientRequestID,
 				"attempts", attempt,
+				"protocol", protocol,
 				"held_for", time.Since(startedAt).String(),
 				"attempt_duration", result.Duration.String(),
 				"response_bytes", result.Bytes,
@@ -214,20 +225,21 @@ func (p *Proxy) serveHeldStream(w http.ResponseWriter, request *http.Request, bo
 			"request_id", requestID,
 			"client_request_id", clientRequestID,
 			"attempt", attempt,
+			"protocol", protocol,
 			"status", result.Status,
 			"error", result.Message,
 			"attempt_duration", result.Duration.String(),
 			"upstream_request_id", result.UpstreamRequestID,
 			"retry_in", delay.String(),
 		)
-		if !p.waitForRetry(w, controller, keepaliveTicker, request.Context(), delay) {
-			p.logClientCancellation(requestID, clientRequestID, attempt, startedAt, request.Context().Err())
+		if !p.waitForRetry(w, controller, keepaliveTicker, request.Context(), delay, protocol) {
+			p.logClientCancellation(requestID, clientRequestID, protocol, attempt, startedAt, request.Context().Err())
 			return
 		}
 	}
 }
 
-func (p *Proxy) logAttemptFinished(requestID, clientRequestID string, attempt int, result attemptResult) {
+func (p *Proxy) logAttemptFinished(requestID, clientRequestID string, protocol streamProtocol, attempt int, result attemptResult) {
 	outcome := "failure"
 	if result.successful() {
 		outcome = "success"
@@ -235,6 +247,7 @@ func (p *Proxy) logAttemptFinished(requestID, clientRequestID string, attempt in
 	p.logger.Info("hold_attempt_finished",
 		"request_id", requestID,
 		"client_request_id", clientRequestID,
+		"protocol", protocol,
 		"attempt", attempt,
 		"outcome", outcome,
 		"upstream_status", result.Status,
@@ -253,13 +266,14 @@ func (p *Proxy) waitForAttempt(
 	keepaliveTicker *time.Ticker,
 	request *http.Request,
 	body []byte,
+	protocol streamProtocol,
 ) (attemptResult, bool) {
 	attemptCtx, cancel := context.WithCancel(request.Context())
 	defer cancel()
 
 	resultCh := make(chan attemptResult, 1)
 	go func() {
-		resultCh <- p.performAttempt(attemptCtx, request, body)
+		resultCh <- p.performAttempt(attemptCtx, request, body, protocol)
 	}()
 
 	for {
@@ -270,7 +284,7 @@ func (p *Proxy) waitForAttempt(
 			cancel()
 			return attemptResult{}, false
 		case <-keepaliveTicker.C:
-			if err := writeKeepalive(w, controller, "waiting"); err != nil {
+			if err := protocol.writeKeepalive(w, controller, "waiting"); err != nil {
 				cancel()
 				return attemptResult{}, false
 			}
@@ -284,6 +298,7 @@ func (p *Proxy) waitForRetry(
 	keepaliveTicker *time.Ticker,
 	ctx context.Context,
 	delay time.Duration,
+	protocol streamProtocol,
 ) bool {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
@@ -294,7 +309,7 @@ func (p *Proxy) waitForRetry(
 		case <-timer.C:
 			return true
 		case <-keepaliveTicker.C:
-			if err := writeKeepalive(w, controller, "waiting"); err != nil {
+			if err := protocol.writeKeepalive(w, controller, "waiting"); err != nil {
 				return false
 			}
 		}
@@ -327,21 +342,15 @@ func (p *Proxy) retryDelay(attempt int) time.Duration {
 	return jittered
 }
 
-func (p *Proxy) logClientCancellation(requestID, clientRequestID string, attempts int, startedAt time.Time, err error) {
+func (p *Proxy) logClientCancellation(requestID, clientRequestID string, protocol streamProtocol, attempts int, startedAt time.Time, err error) {
 	p.logger.Info("hold_client_disconnected",
 		"request_id", requestID,
 		"client_request_id", clientRequestID,
+		"protocol", protocol,
 		"attempts", attempts,
 		"held_for", time.Since(startedAt).String(),
 		"error", err,
 	)
-}
-
-func writeKeepalive(w http.ResponseWriter, controller *http.ResponseController, phase string) error {
-	if _, err := fmt.Fprintf(w, ": stream-hold %s\n\n", phase); err != nil {
-		return err
-	}
-	return controller.Flush()
 }
 
 func replaySpool(w http.ResponseWriter, controller *http.ResponseController, path string) error {

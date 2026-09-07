@@ -147,6 +147,9 @@ func (c Config) Validate() error {
 		if strings.HasPrefix(path, controlPrefix) {
 			return fmt.Errorf("protected path %q conflicts with the control endpoint", path)
 		}
+		if _, supported := streamProtocolForPath(path); !supported {
+			return fmt.Errorf("protected path %q has no stream protocol contract", path)
+		}
 	}
 	if c.KeepaliveInterval <= 0 {
 		return fmt.Errorf("STREAM_HOLD_KEEPALIVE_INTERVAL must be positive")
@@ -172,13 +175,13 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func (c Config) protects(path string) bool {
+func (c Config) protocolForPath(path string) (streamProtocol, bool) {
 	for _, protectedPath := range c.ProtectedPaths {
 		if path == protectedPath {
-			return true
+			return streamProtocolForPath(path)
 		}
 	}
-	return false
+	return "", false
 }
 
 func splitPaths(value string) []string {

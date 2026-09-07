@@ -34,13 +34,14 @@ type terminalEvent struct {
 
 type sseDecoder struct {
 	maxLineBytes int
+	protocol     streamProtocol
 	line         []byte
 	eventName    string
 	dataLines    []string
 }
 
-func newSSEDecoder(maxLineBytes int) *sseDecoder {
-	return &sseDecoder{maxLineBytes: maxLineBytes}
+func newSSEDecoder(protocol streamProtocol, maxLineBytes int) *sseDecoder {
+	return &sseDecoder{protocol: protocol, maxLineBytes: maxLineBytes}
 }
 
 func (d *sseDecoder) Feed(raw []byte) (terminalEvent, error) {
@@ -121,11 +122,14 @@ func (d *sseDecoder) finishEvent() terminalEvent {
 	if eventName == "" && strings.TrimSpace(data) == "" {
 		return terminalEvent{}
 	}
-	return classifySSEEvent(eventName, data)
+	return classifySSEEvent(d.protocol, eventName, data)
 }
 
-func classifySSEEvent(eventName, data string) terminalEvent {
+func classifySSEEvent(protocol streamProtocol, eventName, data string) terminalEvent {
 	trimmedData := strings.TrimSpace(data)
+	if protocol == streamProtocolOpenAIChatCompletions && trimmedData == "[DONE]" {
+		return terminalEvent{Kind: terminalSuccess, Type: "done"}
+	}
 
 	payloadType := ""
 	message := ""

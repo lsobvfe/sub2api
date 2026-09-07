@@ -246,6 +246,46 @@ func TestProxyHoldsAnthropicMessagesStream(t *testing.T) {
 	if !strings.Contains(string(body), "hello") {
 		t.Fatalf("Anthropic content missing: %s", body)
 	}
+	if strings.Contains(string(body), "response.metadata") {
+		t.Fatalf("Responses keepalive leaked into Messages stream: %s", body)
+	}
+}
+
+func TestProxyHoldsChatCompletionsAfterServiceUnavailable(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			http.Error(w, `{"message":"Service temporarily unavailable","type":"api_error"}`, http.StatusServiceUnavailable)
+			return
+		}
+		writeChatCompletedStream(w, "recovered")
+	}))
+	defer upstream.Close()
+
+	body, status := makeHeldRequestTo(
+		t,
+		newTestProxy(t, upstream.URL, true),
+		"/v1/chat/completions",
+		`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"test"}],"stream":true}`,
+	)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+	if strings.Contains(body, "Service temporarily unavailable") || strings.Contains(body, `"type":"api_error"`) {
+		t.Fatalf("upstream 503 leaked to client: %s", body)
+	}
+	if strings.Contains(body, "response.metadata") {
+		t.Fatalf("Responses keepalive leaked into Chat Completions stream: %s", body)
+	}
+	if strings.Count(body, "data: [DONE]") != 1 {
+		t.Fatalf("DONE count = %d, want 1; body = %s", strings.Count(body, "data: [DONE]"), body)
+	}
+	if !strings.Contains(body, "recovered") {
+		t.Fatalf("successful Chat Completions stream missing: %s", body)
+	}
 }
 
 func TestProxyRotatesAfterStreamIdleTimeout(t *testing.T) {
@@ -363,6 +403,57 @@ func TestClientCancellationStopsRetryLoop(t *testing.T) {
 	t.Fatal("cancelled request remained active")
 }
 
+func TestWriteKeepaliveEmitsResponseMetadata(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	if err := streamProtocolOpenAIResponses.writeKeepalive(recorder, http.NewResponseController(recorder), "waiting"); err != nil {
+		t.Fatalf("write keepalive: %v", err)
+	}
+
+	line, _, found := strings.Cut(recorder.Body.String(), "\n")
+	if !found {
+		t.Fatalf("SSE frame missing line terminator: %q", recorder.Body.String())
+	}
+	data, found := strings.CutPrefix(line, "data: ")
+	if !found {
+		t.Fatalf("SSE frame = %q, want data frame", line)
+	}
+
+	var payload struct {
+		Type       string            `json:"type"`
+		StreamHold map[string]string `json:"stream_hold"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		t.Fatalf("decode keepalive payload: %v", err)
+	}
+	if payload.Type != "response.metadata" {
+		t.Fatalf("type = %q, want response.metadata", payload.Type)
+	}
+	if payload.StreamHold["phase"] != "waiting" {
+		t.Fatalf("phase = %q, want waiting", payload.StreamHold["phase"])
+	}
+}
+
+func TestWriteKeepaliveEmitsCommentForNonResponsesProtocols(t *testing.T) {
+	for _, protocol := range []streamProtocol{
+		streamProtocolAnthropicMessages,
+		streamProtocolOpenAIChatCompletions,
+	} {
+		t.Run(protocol.String(), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			if err := protocol.writeKeepalive(recorder, http.NewResponseController(recorder), "waiting"); err != nil {
+				t.Fatalf("write keepalive: %v", err)
+			}
+			frame := recorder.Body.String()
+			if frame != ": stream-hold waiting\n\n" {
+				t.Fatalf("keepalive frame = %q", frame)
+			}
+			if strings.Contains(frame, "response.metadata") {
+				t.Fatalf("Responses metadata leaked into %s", protocol)
+			}
+		})
+	}
+}
+
 func newTestProxy(t *testing.T, upstreamURL string, enabled bool) *Proxy {
 	t.Helper()
 	return newTestProxyWithLogger(t, upstreamURL, enabled, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -378,7 +469,7 @@ func newTestProxyWithLogger(t *testing.T, upstreamURL string, enabled bool, logg
 	cfg := Config{
 		ListenAddr:            "127.0.0.1:0",
 		UpstreamURL:           parsed,
-		ProtectedPaths:        []string{"/responses"},
+		ProtectedPaths:        allStreamProtocolPaths(),
 		Enabled:               enabled,
 		StateFile:             tempDir + "/state.json",
 		SpoolDir:              tempDir + "/spool",
@@ -407,14 +498,18 @@ func newTestProxyWithLogger(t *testing.T, upstreamURL string, enabled bool, logg
 }
 
 func makeHeldRequest(t *testing.T, handler http.Handler) (string, int) {
+	return makeHeldRequestTo(t, handler, "/responses", `{"model":"gpt-test","stream":true}`)
+}
+
+func makeHeldRequestTo(t *testing.T, handler http.Handler, path, requestBody string) (string, int) {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
 	request, err := http.NewRequest(
 		http.MethodPost,
-		server.URL+"/responses",
-		bytes.NewBufferString(`{"model":"gpt-test","stream":true}`),
+		server.URL+path,
+		bytes.NewBufferString(requestBody),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -426,11 +521,11 @@ func makeHeldRequest(t *testing.T, handler http.Handler) (string, int) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
+	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(body), response.StatusCode
+	return string(responseBody), response.StatusCode
 }
 
 func writeCompletedStream(w http.ResponseWriter, text string) {
@@ -439,6 +534,14 @@ func writeCompletedStream(w http.ResponseWriter, text string) {
 		"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"+
 			"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":"+quote(text)+"}\n\n"+
 			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+	)
+}
+
+func writeChatCompletedStream(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = io.WriteString(w,
+		"data: {\"id\":\"chatcmpl_test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":"+quote(text)+"},\"finish_reason\":null}]}\n\n"+
+			"data: [DONE]\n\n",
 	)
 }
 

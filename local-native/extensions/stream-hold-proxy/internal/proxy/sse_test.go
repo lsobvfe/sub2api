@@ -3,7 +3,7 @@ package proxy
 import "testing"
 
 func TestSSEDecoderRecognizesCompletedResponse(t *testing.T) {
-	decoder := newSSEDecoder(1024)
+	decoder := newSSEDecoder(streamProtocolOpenAIResponses, 1024)
 	event, err := decoder.Feed([]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -14,7 +14,7 @@ func TestSSEDecoderRecognizesCompletedResponse(t *testing.T) {
 }
 
 func TestSSEDecoderRecognizesAnthropicMessageStop(t *testing.T) {
-	decoder := newSSEDecoder(1024)
+	decoder := newSSEDecoder(streamProtocolAnthropicMessages, 1024)
 	event, err := decoder.Feed([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -24,19 +24,33 @@ func TestSSEDecoderRecognizesAnthropicMessageStop(t *testing.T) {
 	}
 }
 
-func TestSSEDecoderDoesNotTreatLegacyDoneAsSuccess(t *testing.T) {
-	decoder := newSSEDecoder(1024)
+func TestSSEDecoderRecognizesChatCompletionsDone(t *testing.T) {
+	decoder := newSSEDecoder(streamProtocolOpenAIChatCompletions, 1024)
+	event, err := decoder.Feed([]byte("data: [DONE]\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Kind != terminalSuccess {
+		t.Fatalf("kind = %v, want terminalSuccess", event.Kind)
+	}
+	if event.Type != "done" {
+		t.Fatalf("type = %q, want done", event.Type)
+	}
+}
+
+func TestSSEDecoderDoesNotTreatDoneAsResponsesCompletion(t *testing.T) {
+	decoder := newSSEDecoder(streamProtocolOpenAIResponses, 1024)
 	event, err := decoder.Feed([]byte("data: [DONE]\n\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if event.Kind == terminalSuccess {
-		t.Fatal("legacy [DONE] marker must not complete a native stream")
+		t.Fatal("Chat Completions [DONE] marker must not complete a Responses stream")
 	}
 }
 
 func TestSSEDecoderRecognizesCapacityFailureMessage(t *testing.T) {
-	decoder := newSSEDecoder(4096)
+	decoder := newSSEDecoder(streamProtocolOpenAIResponses, 4096)
 	event, err := decoder.Feed([]byte(
 		"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"Selected model is at capacity. Please try a different model.\"}}}\n\n",
 	))
@@ -52,7 +66,7 @@ func TestSSEDecoderRecognizesCapacityFailureMessage(t *testing.T) {
 }
 
 func TestSSEDecoderRecognizesErrorEvent(t *testing.T) {
-	decoder := newSSEDecoder(1024)
+	decoder := newSSEDecoder(streamProtocolOpenAIResponses, 1024)
 	event, err := decoder.Feed([]byte("event: error\ndata: {\"error\":{\"message\":\"upstream failed\"}}\n\n"))
 	if err != nil {
 		t.Fatal(err)
