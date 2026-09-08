@@ -34,7 +34,7 @@ func TestResolveLogFilePath_ExplicitPath(t *testing.T) {
 	}
 }
 
-func TestNormalizedOptions_InvalidFallback(t *testing.T) {
+func TestNormalizedOptions_PreservesDisabledOutput(t *testing.T) {
 	t.Setenv("DATA_DIR", "")
 	opts := InitOptions{
 		Level:           "TRACE",
@@ -62,8 +62,8 @@ func TestNormalizedOptions_InvalidFallback(t *testing.T) {
 		// normalized 仅做 trim/lower，不做校验；校验在 config 层。
 		t.Fatalf("normalized level should preserve value for upstream validation, got %q", out.Level)
 	}
-	if !out.Output.ToStdout {
-		t.Fatalf("normalized output should fallback to stdout")
+	if out.Output.ToStdout || out.Output.ToFile {
+		t.Fatalf("normalized output should remain disabled: %+v", out.Output)
 	}
 	if out.Output.FilePath != DefaultContainerLogPath {
 		t.Fatalf("normalized file path = %q", out.Output.FilePath)

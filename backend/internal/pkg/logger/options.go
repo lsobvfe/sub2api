@@ -67,9 +67,6 @@ func (o InitOptions) normalized() InitOptions {
 	if out.StacktraceLevel == "" {
 		out.StacktraceLevel = "error"
 	}
-	if !out.Output.ToStdout && !out.Output.ToFile {
-		out.Output.ToStdout = true
-	}
 	out.Output.FilePath = resolveLogFilePath(out.Output.FilePath)
 	if out.Rotation.MaxSizeMB <= 0 {
 		out.Rotation.MaxSizeMB = 100

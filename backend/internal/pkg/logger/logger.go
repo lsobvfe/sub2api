@@ -284,18 +284,13 @@ func buildLogger(options InitOptions) (*zap.Logger, zap.AtomicLevel, error) {
 	if options.Output.ToFile {
 		fileCore, filePath, fileErr := buildFileCore(enc, atomic, options)
 		if fileErr != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "time=%s level=WARN msg=\"日志文件输出初始化失败，降级为仅标准输出\" path=%s err=%v\n",
-				time.Now().Format(time.RFC3339Nano),
-				filePath,
-				fileErr,
-			)
-		} else {
-			cores = append(cores, fileCore)
+			return nil, atomic, fmt.Errorf("initialize file log output %q: %w", filePath, fileErr)
 		}
+		cores = append(cores, fileCore)
 	}
 
 	if len(cores) == 0 {
-		cores = append(cores, zapcore.NewCore(enc, zapcore.Lock(os.Stdout), atomic))
+		return nil, atomic, fmt.Errorf("logger requires stdout or file output")
 	}
 
 	core := zapcore.NewTee(cores...)

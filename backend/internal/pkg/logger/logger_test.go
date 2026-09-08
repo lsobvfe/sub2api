@@ -91,28 +91,8 @@ func TestInit_DualOutput(t *testing.T) {
 	}
 }
 
-func TestInit_FileOutputFailureDowngrade(t *testing.T) {
-	origStdout := os.Stdout
-	origStderr := os.Stderr
-	_, stdoutW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
-	}
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stderr pipe: %v", err)
-	}
-	os.Stdout = stdoutW
-	os.Stderr = stderrW
-	t.Cleanup(func() {
-		os.Stdout = origStdout
-		os.Stderr = origStderr
-		_ = stdoutW.Close()
-		_ = stderrR.Close()
-		_ = stderrW.Close()
-	})
-
-	err = Init(InitOptions{
+func TestInit_FileOutputFailureReturnsError(t *testing.T) {
+	err := Init(InitOptions{
 		Level:  "info",
 		Format: "json",
 		Output: OutputOptions{
@@ -126,14 +106,25 @@ func TestInit_FileOutputFailureDowngrade(t *testing.T) {
 			MaxAgeDays: 1,
 		},
 	})
-	if err != nil {
-		t.Fatalf("Init() should downgrade instead of failing, got: %v", err)
+	if err == nil {
+		t.Fatal("Init() should fail when file output cannot initialize")
 	}
+	if !strings.Contains(err.Error(), "initialize file log output") {
+		t.Fatalf("Init() error = %v", err)
+	}
+}
 
-	_ = stderrW.Close()
-	stderrBytes, _ := io.ReadAll(stderrR)
-	if !strings.Contains(string(stderrBytes), "日志文件输出初始化失败") {
-		t.Fatalf("stderr should contain fallback warning, got: %s", string(stderrBytes))
+func TestInit_WithoutOutputReturnsError(t *testing.T) {
+	err := Init(InitOptions{
+		Level:  "info",
+		Format: "json",
+		Output: OutputOptions{},
+	})
+	if err == nil {
+		t.Fatal("Init() should fail when no output is configured")
+	}
+	if !strings.Contains(err.Error(), "logger requires stdout or file output") {
+		t.Fatalf("Init() error = %v", err)
 	}
 }
 
