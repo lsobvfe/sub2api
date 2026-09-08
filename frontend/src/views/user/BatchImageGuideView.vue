@@ -764,6 +764,7 @@ import Icon from '@/components/icons/Icon.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { getPersistedPageSize, setPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { useAppStore } from '@/stores/app'
+import { buildGatewayUrl } from '@/api/client'
 import { keysAPI } from '@/api'
 import {
   cancelBatchImageJob,
@@ -1030,7 +1031,7 @@ const currentDisplayJob = computed(() => {
 const endpointBase = computed(() => {
   const configured = appStore.apiBaseUrl?.trim()
   if (configured) return configured.replace(/\/+$/, '')
-  if (typeof window !== 'undefined') return window.location.origin.replace(/\/+$/, '')
+  if (typeof window !== 'undefined') return buildGatewayUrl('/').replace(/\/+$/, '')
   return '<你的 Sub2API API 端点>'
 })
 

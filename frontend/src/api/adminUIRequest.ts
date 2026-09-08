@@ -1,3 +1,5 @@
+import { stripGatewayBasePath } from './url'
+
 export const ADMIN_UI_REQUEST_HEADER = 'X-Admin-UI-Request'
 export const USER_UI_REQUEST_HEADER = 'X-User-UI-Request'
 
@@ -15,9 +17,9 @@ function requestPath(rawURL: string): string {
   if (!value) return ''
   try {
     const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost'
-    return new URL(value, origin).pathname
+    return stripGatewayBasePath(new URL(value, origin).pathname)
   } catch {
-    return value.split(/[?#]/, 1)[0]
+    return stripGatewayBasePath(value.split(/[?#]/, 1)[0])
   }
 }
 

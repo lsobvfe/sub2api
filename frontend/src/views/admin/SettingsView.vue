@@ -8766,6 +8766,7 @@
 import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { adminAPI } from "@/api";
+import { buildGatewayUrl } from "@/api/client";
 import {
   appendAuthSourceDefaultsToUpdateRequest,
   buildAuthSourceDefaultsState,
@@ -10437,8 +10438,7 @@ const addQuotaNotifyEmail = () => {
   });
 };
 
-const currentOrigin =
-  typeof window !== "undefined" ? window.location.origin : "";
+const currentOrigin = buildGatewayUrl("/").replace(/\/+$/, "");
 
 function buildApiCallbackUrl(path: string): string {
   const base = (form.api_base_url || currentOrigin).replace(/\/+$/, "");

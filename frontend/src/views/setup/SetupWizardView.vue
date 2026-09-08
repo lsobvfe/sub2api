@@ -667,7 +667,7 @@ async function waitForServiceRestart() {
           serviceReady.value = true
           // Redirect to login page after a short delay
           setTimeout(() => {
-            window.location.href = '/login'
+            window.location.href = buildGatewayUrl('/login')
           }, 1500)
           return
         }

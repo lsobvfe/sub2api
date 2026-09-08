@@ -312,6 +312,7 @@ import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Select from '@/components/common/Select.vue'
 import type { SelectOption } from '@/components/common/Select.vue'
 import ToggleSwitch from './ToggleSwitch.vue'
+import { buildGatewayUrl } from '@/api/client'
 import type { ProviderInstance } from '@/types/payment'
 import type { EasyPayCustomMethod, TypeOption } from './providerConfig'
 import {
@@ -413,7 +414,7 @@ const visibleFields = reactive<Record<string, boolean>>({})
 const easyPayCustomMethods = reactive<EasyPayCustomMethod[]>([])
 
 // --- Computed ---
-const defaultBaseUrl = typeof window !== 'undefined' ? window.location.origin : ''
+const defaultBaseUrl = buildGatewayUrl('/').replace(/\/+$/, '')
 
 const providerWebhookHintMap: Record<string, string> = {
   stripe: 'admin.settings.payment.stripeWebhookHint',

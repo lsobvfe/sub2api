@@ -39,6 +39,22 @@ describe('API Client', () => {
       )
     })
 
+    it('保留部署在子路径下的网关前缀', async () => {
+      vi.resetModules()
+      vi.stubEnv('VITE_API_BASE_URL', '/sub2api/api/v1')
+
+      const mod = await import('@/api/client')
+
+      expect(mod.apiClient.defaults.baseURL).toBe('/sub2api/api/v1')
+      expect(mod.buildApiUrl('/api/v1/auth/login')).toBe('/sub2api/api/v1/auth/login')
+      expect(mod.buildGatewayUrl('/v1/models')).toBe(
+        `${window.location.origin}/sub2api/v1/models`
+      )
+      expect(mod.buildGatewayUrl('/api/v1/admin/ops/ws/qps')).toBe(
+        `${window.location.origin}/sub2api/api/v1/admin/ops/ws/qps`
+      )
+    })
+
     it('自动附加 Authorization 头', async () => {
       localStorage.setItem('auth_token', 'my-jwt-token')
 

@@ -1168,6 +1168,7 @@ import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
 import { formatDateTime } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
+import { buildGatewayUrl } from '@/api/client'
 import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
@@ -1912,7 +1913,7 @@ const importToCcswitch = (row: ApiKey) => {
 }
 
 const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
-  const baseUrl = publicSettings.value?.api_base_url || window.location.origin
+  const baseUrl = publicSettings.value?.api_base_url || buildGatewayUrl('/')
   const platform = row.group?.platform || 'anthropic'
 
   const usageScript = `({

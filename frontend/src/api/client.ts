@@ -13,8 +13,8 @@ import {
   shouldMarkUserUIRequest,
 } from './adminUIRequest'
 import { refreshAuthTokens } from './tokenRefresh'
-import { getAPIBaseURL } from './url'
-export { buildApiUrl, buildGatewayUrl } from './url'
+import { buildGatewayUrl, getAPIBaseURL, stripGatewayBasePath } from './url'
+export { buildApiUrl, buildGatewayUrl, stripGatewayBasePath } from './url'
 
 // ==================== Axios Instance Configuration ====================
 
@@ -131,8 +131,8 @@ apiClient.interceptors.response.use(
           // ignore event failures
         }
 
-        if (window.location.pathname.startsWith('/admin/ops')) {
-          window.location.href = '/admin/settings'
+        if (stripGatewayBasePath(window.location.pathname).startsWith('/admin/ops')) {
+          window.location.href = buildGatewayUrl('/admin/settings')
         }
 
         return Promise.reject({
@@ -207,8 +207,8 @@ apiClient.interceptors.response.use(
             localStorage.removeItem('token_expires_at')
             sessionStorage.setItem('auth_expired', '1')
 
-            if (!window.location.pathname.includes('/login')) {
-              window.location.href = '/login'
+            if (!stripGatewayBasePath(window.location.pathname).includes('/login')) {
+              window.location.href = buildGatewayUrl('/login')
             }
 
             return Promise.reject({
@@ -238,8 +238,8 @@ apiClient.interceptors.response.use(
           sessionStorage.setItem('auth_expired', '1')
         }
         // Only redirect if not already on login page
-        if (!window.location.pathname.includes('/login')) {
-          window.location.href = '/login'
+        if (!stripGatewayBasePath(window.location.pathname).includes('/login')) {
+          window.location.href = buildGatewayUrl('/login')
         }
       }
 

@@ -35,6 +35,7 @@ import {
   readPaymentRecoverySnapshot,
   type PaymentRecoverySnapshot,
 } from '@/components/payment/paymentFlow'
+import { buildGatewayUrl } from '@/api/client'
 
 const { t, locale } = useI18n()
 const route = useRoute()
@@ -50,7 +51,7 @@ function queryString(key: string): string {
 }
 
 function buildSuccessUrl(snapshot: PaymentRecoverySnapshot): string {
-  const url = new URL('/payment/result', window.location.origin)
+  const url = new URL(buildGatewayUrl('/payment/result'))
   const orderId = queryString('order_id')
   const outTradeNo = queryString('out_trade_no')
   const resumeToken = queryString('resume_token')

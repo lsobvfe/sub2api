@@ -3,6 +3,17 @@ import vue from '@vitejs/plugin-vue'
 import checker from 'vite-plugin-checker'
 import { resolve } from 'path'
 
+function normalizeAppBasePath(value: string | undefined): string {
+  const raw = String(value || '/').trim() || '/'
+  if (raw === '/') {
+    return raw
+  }
+  if (!/^\/[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw)) {
+    throw new Error('VITE_APP_BASE_PATH must be an absolute application path.')
+  }
+  return `${raw.replace(/\/+$/, '')}/`
+}
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({
     '&': '&amp;',
@@ -84,6 +95,7 @@ export default defineConfig(({ mode }) => {
   const devPort = Number(env.VITE_DEV_PORT || 3000)
 
   return {
+    base: normalizeAppBasePath(env.VITE_APP_BASE_PATH),
     plugins: [
       vue(),
       checker({

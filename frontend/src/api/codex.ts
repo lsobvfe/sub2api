@@ -1,3 +1,5 @@
+import { buildGatewayUrl } from './url'
+
 export interface CodexModelsManifestResult {
   content: string
   modelCount: number
@@ -6,7 +8,7 @@ export interface CodexModelsManifestResult {
 const DEFAULT_CODEX_CLIENT_VERSION = '0.147.0'
 
 function normalizeCodexBaseUrl(baseUrl: string): string {
-  const fallback = typeof window !== 'undefined' ? window.location.origin : ''
+  const fallback = buildGatewayUrl('/')
   const value = (baseUrl || fallback).trim().replace(/\/+$/, '')
   if (!value) return '/v1'
   return /\/v1$/i.test(value) ? value : `${value}/v1`

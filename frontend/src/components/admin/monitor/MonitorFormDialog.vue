@@ -240,6 +240,7 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 import { adminAPI } from '@/api/admin'
 import { keysAPI } from '@/api/keys'
 import { userGroupsAPI } from '@/api/groups'
+import { buildGatewayUrl } from '@/api/client'
 import type {
   BodyOverrideMode,
   ChannelMonitor,
@@ -775,7 +776,7 @@ watch(
 )
 
 function useCurrentDomain() {
-  form.endpoint = window.location.origin
+  form.endpoint = buildGatewayUrl('/').replace(/\/+$/, '')
 }
 
 async function openMyKeyPicker() {
